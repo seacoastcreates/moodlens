@@ -1,0 +1,19 @@
+{
+  "expo": {
+    "name": "MoodLens",
+    "slug": "moodlens",
+    "orientation": "portrait",
+    "version": "0.1.0",
+    "icon": "./assets/icon.png",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.example.moodlens",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "We use the microphone to analyze tone of voice for mood detection."
+      }
+    },
+    "android": {
+      "package": "com.example.moodlens"
+    }
+  }
+}

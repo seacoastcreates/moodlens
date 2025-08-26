@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+transformers
+torch
+pydantic
+sqlalchemy
+psycopg2-binary
+python-multipart
+librosa
+soundfile
+numpy
