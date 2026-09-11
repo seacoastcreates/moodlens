@@ -50,10 +50,9 @@ def get_audio_pipeline():
         AutoModelForAudioClassification,
         AutoFeatureExtractor,
     )
-    model_id = "superb/wav2vec2-base-superb-er"  # categorical SER (angry, happy, sad, neutral, etc.)
+    # UPDATED: 8-class RAVDESS model
+    model_id = "ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition"
 
-    # Force a consistent load path with safetensors if available.
-    # (If safetensors aren't available for your local HF cache, it will fall back automatically.)
     config = AutoConfig.from_pretrained(model_id, use_safetensors=True)
     feature_extractor = AutoFeatureExtractor.from_pretrained(model_id)
     model = AutoModelForAudioClassification.from_pretrained(
@@ -68,6 +67,36 @@ def get_audio_pipeline():
         feature_extractor=feature_extractor,
         top_k=None,  # return full distribution
     )
+
+# Map 8 audio labels -> your text label space (GoEmotions-compatible)
+AUDIO2TEXT = {
+    "angry": "anger",
+    "fearful": "fear",
+    "happy": "joy",
+    "sad": "sadness",
+    "neutral": "neutral",
+    "calm": "neutral",       # merge with neutral
+    "disgust": "disgust",
+    "surprised": "surprise",
+}
+
+def _map_to_text_space(scores: list[dict]) -> list[dict]:
+    """
+    Merge/rename the audio model's labels into your text label set.
+    Input: [{"label": "...", "score": float}, ...] over the 8 audio labels.
+    Output: same structure but only text labels (merged & renormalized).
+    """
+    if not scores:
+        return scores
+    bucket = {}
+    for d in scores:
+        tlabel = AUDIO2TEXT.get(d["label"], d["label"])
+        bucket[tlabel] = bucket.get(tlabel, 0.0) + float(d["score"])
+    total = sum(bucket.values()) or 1.0
+    merged = [{"label": k, "score": v / total} for k, v in bucket.items()]
+    merged.sort(key=lambda x: x["score"], reverse=True)
+    return merged
+
 # -------- FastAPI app --------
 app = FastAPI(title="MoodLens API", version="0.1.0")
 
@@ -206,13 +235,16 @@ async def analyze_audio(file: UploadFile = File(...)):
         if not final_scores:
             raise ValueError("No scores produced")
 
+        # NEW: map the 8-class audio labels into your text label space
+        final_scores = _map_to_text_space(final_scores)
+
         # Compute entropy (confidence proxy)
         H = round(_entropy(final_scores), 3)
 
         # Keep only top K for the client UI
         topk = final_scores[:TOPK]
         top_label = topk[0]["label"]
-        top_confidence = round(topk[0]["score"] * 100.0, 1)  # percent
+        top_confidence = round(topk[0]["score"] * 100.0, 1)
 
         resp = {
             "top_label": top_label,

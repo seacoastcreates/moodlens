@@ -1,5 +1,5 @@
 // src/screens/HomeScreen.tsx
-import React, { useRef, useState } from 'react';
+import React, { useCallback, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -11,12 +11,14 @@ import {
   Pressable,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useFocusEffect } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../App';
 import { API_URL } from '../config';
 import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system';
-import { pushHistory } from '../sync';
+import { fetchHistory, pushHistory } from '../sync';
+import { computeInsights, InsightBundle, TimelineEntry } from '../analytics';
 
 type Mode = 'text' | 'voice';
 type Props = NativeStackScreenProps<RootStackParamList, 'Home'>;
@@ -34,6 +36,76 @@ export default function HomeScreen({ navigation }: Props) {
   const [isRecording, setIsRecording] = useState(false);
   const [loadingVoice, setLoadingVoice] = useState(false);
   const [lastRecordingUri, setLastRecordingUri] = useState<string | null>(null);
+
+  // --- Insight state ---
+  const [insights, setInsights] = useState<InsightBundle | null>(null);
+  const [loadingInsights, setLoadingInsights] = useState(false);
+  const [insightsError, setInsightsError] = useState<string | null>(null);
+
+  const refreshInsights = useCallback(async () => {
+    setLoadingInsights(true);
+    setInsightsError(null);
+    try {
+      const raw = await AsyncStorage.getItem('history');
+      const local: any[] = raw ? JSON.parse(raw) : [];
+
+      let cloud: any[] = [];
+      try {
+        cloud = await fetchHistory(75);
+      } catch (err) {
+        console.warn('History sync failed (non-blocking)', err);
+      }
+
+      const timeline: TimelineEntry[] = [];
+
+      const normalizeScores = (scores: any): { label: string; score: number }[] =>
+        Array.isArray(scores)
+          ? scores
+              .filter((s: any) => s && typeof s.label === 'string' && s.score != null)
+              .map((s: any) => ({ label: String(s.label), score: Number(s.score) }))
+          : [];
+
+      const addEntry = (entry: any, isCloud = false) => {
+        const tsSource = isCloud ? entry.created_at : entry.ts;
+        const timestamp = typeof tsSource === 'number' ? tsSource : Date.parse(tsSource ?? '');
+        const topLabel = isCloud ? entry.top_label : entry.result?.top_label;
+        const scores = isCloud ? entry.scores : entry.result?.scores;
+        if (!topLabel || Number.isNaN(timestamp)) return;
+
+        timeline.push({
+          timestamp,
+          topLabel: String(topLabel),
+          scores: normalizeScores(scores),
+          mode: (isCloud ? entry.mode : entry.mode) ?? 'text',
+        });
+      };
+
+      local.forEach((entry) => addEntry(entry));
+      cloud.forEach((entry) => addEntry(entry, true));
+
+      const deduped = Array.from(
+        new Map(
+          timeline.map((entry) => [
+            `${Math.round(entry.timestamp)}-${entry.topLabel}-${entry.mode}`,
+            entry,
+          ])
+        ).values()
+      );
+
+      const bundle = computeInsights(deduped);
+      setInsights(bundle);
+    } catch (err: any) {
+      setInsightsError(err?.message ?? 'Unable to load insights');
+    } finally {
+      setLoadingInsights(false);
+    }
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      refreshInsights();
+    }, [refreshInsights])
+  );
 
   // ========= TEXT MODE =========
   const analyzeText = async () => {
@@ -54,7 +126,6 @@ export default function HomeScreen({ navigation }: Props) {
       }
       const data = await res.json();
 
-      // Save simple history entry
       const entry = { ts: Date.now(), mode: 'text' as const, text, fileUri: null, result: data };
       const existing = await AsyncStorage.getItem('history');
       const history = existing ? JSON.parse(existing) : [];
@@ -67,6 +138,8 @@ export default function HomeScreen({ navigation }: Props) {
         top_label: data.top_label,
         scores: data.scores,
       });
+
+      refreshInsights();
 
       navigation.navigate('Result', {
         text,
@@ -97,7 +170,6 @@ export default function HomeScreen({ navigation }: Props) {
         staysActiveInBackground: false,
       });
 
-      // Configure linear PCM WAV (16 kHz mono)
       const recording = new Audio.Recording();
       await recording.prepareToRecordAsync({
         android: {
@@ -155,8 +227,8 @@ export default function HomeScreen({ navigation }: Props) {
       if (!info.exists) throw new Error('Recorded file not found');
 
       const form = new FormData();
+      // @ts-ignore React Native FormData file shape
       form.append('file', {
-        // @ts-ignore React Native FormData file
         uri: lastRecordingUri,
         name: 'voice.wav',
         type: 'audio/wav',
@@ -173,7 +245,6 @@ export default function HomeScreen({ navigation }: Props) {
       }
       const data = await res.json();
 
-      // Save history entry (keep the actual fileUri)
       const entry = {
         ts: Date.now(),
         mode: 'voice' as const,
@@ -189,10 +260,11 @@ export default function HomeScreen({ navigation }: Props) {
       await pushHistory({
         mode: 'voice',
         text: null,
-        // file_url: remoteUrlFromUpload, // optional if you implement upload
         top_label: data.top_label,
         scores: data.scores,
       });
+
+      refreshInsights();
 
       navigation.navigate('Result', {
         text: '[voice clip]',
@@ -266,6 +338,8 @@ export default function HomeScreen({ navigation }: Props) {
   return (
     <View style={styles.container}>
       <Text style={styles.title}>MoodLens</Text>
+      <Text style={styles.subtitleLead}>Track how you feel across text, voice, and more.</Text>
+
       <View style={styles.topRow}>
         {renderToggle()}
         <Pressable style={styles.historyBtn} onPress={() => navigation.navigate('History')}>
@@ -273,14 +347,104 @@ export default function HomeScreen({ navigation }: Props) {
         </Pressable>
       </View>
 
+      <InsightsPanel loading={loadingInsights} error={insightsError} insights={insights} />
+
       {mode === 'text' ? renderTextUI() : renderVoiceUI()}
+
+      <View style={styles.privacyCard}>
+        <Text style={styles.privacyTitle}>Privacy first</Text>
+        <Text style={styles.privacyCopy}>
+          Text entries stay local until you sync. Voice clips remain on device unless you choose to
+          upload. You’re in control of what reaches the cloud.
+        </Text>
+      </View>
+    </View>
+  );
+}
+
+type InsightsProps = {
+  loading: boolean;
+  error: string | null;
+  insights: InsightBundle | null;
+};
+
+function InsightsPanel({ loading, error, insights }: InsightsProps) {
+  if (loading) {
+    return (
+      <View style={styles.insightsCard}>
+        <ActivityIndicator />
+        <Text style={styles.insightsMuted}>Crunching your mood trends…</Text>
+      </View>
+    );
+  }
+
+  if (error) {
+    return (
+      <View style={styles.insightsCardError}>
+        <Text style={styles.insightsErrorTitle}>Insights unavailable</Text>
+        <Text style={styles.insightsErrorCopy}>{error}</Text>
+      </View>
+    );
+  }
+
+  if (!insights || insights.entriesAnalyzed === 0) {
+    return (
+      <View style={styles.insightsCard}>
+        <Text style={styles.insightsTitle}>Daily mood insights</Text>
+        <Text style={styles.insightsMuted}>
+          Capture a few entries to unlock personalized trends, recommendations, and gentle alerts.
+        </Text>
+      </View>
+    );
+  }
+
+  const recommendation = insights.recommendation;
+
+  return (
+    <View style={styles.insightsCard}>
+      <Text style={styles.insightsTitle}>Daily mood insights</Text>
+      {insights.todaySummary ? (
+        <Text style={styles.insightsPrimary}>{insights.todaySummary}</Text>
+      ) : null}
+      {insights.trendMessage ? (
+        <Text style={styles.insightsBody}>{insights.trendMessage}</Text>
+      ) : null}
+      {insights.alert ? (
+        <View style={styles.alertBox}>
+          <Text style={styles.alertTitle}>Predictive alert</Text>
+          <Text style={styles.alertCopy}>{insights.alert}</Text>
+        </View>
+      ) : null}
+
+      {recommendation ? (
+        <View style={styles.recoBox}>
+          <Text style={styles.recoTitle}>{recommendation.headline}</Text>
+          {recommendation.actions.map((action) => (
+            <Text style={styles.recoItem} key={action}>
+              • {action}
+            </Text>
+          ))}
+        </View>
+      ) : null}
+
+      {insights.distribution.length ? (
+        <View style={styles.distWrap}>
+          {insights.distribution.map((item) => (
+            <View key={item.label} style={styles.distRow}>
+              <Text style={styles.distLabel}>{item.label}</Text>
+              <Text style={styles.distValue}>{item.percent}%</Text>
+            </View>
+          ))}
+        </View>
+      ) : null}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 20, gap: 16, backgroundColor: 'white' },
-  title: { fontSize: 28, fontWeight: '800' },
+  title: { fontSize: 32, fontWeight: '800' },
+  subtitleLead: { color: '#4d4d4d', marginBottom: 8 },
   topRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
 
   card: {
@@ -333,4 +497,63 @@ const styles = StyleSheet.create({
     backgroundColor: 'white',
   },
   historyBtnText: { fontWeight: '700' },
+
+  insightsCard: {
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#e3e3e7',
+    padding: 18,
+    gap: 10,
+    backgroundColor: '#f8f9ff',
+  },
+  insightsCardError: {
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#f5c4c4',
+    padding: 18,
+    gap: 8,
+    backgroundColor: '#fff6f6',
+  },
+  insightsTitle: { fontWeight: '700', fontSize: 18 },
+  insightsPrimary: { fontWeight: '600', color: '#1f2933' },
+  insightsBody: { color: '#394150' },
+  insightsMuted: { color: '#6a738b' },
+  insightsErrorTitle: { fontWeight: '700', color: '#a11a1a' },
+  insightsErrorCopy: { color: '#8a2121' },
+  alertBox: {
+    backgroundColor: '#fff3cd',
+    borderRadius: 12,
+    padding: 12,
+    gap: 4,
+    borderWidth: 1,
+    borderColor: '#ffe9a7',
+  },
+  alertTitle: { fontWeight: '700', color: '#835200' },
+  alertCopy: { color: '#7a5c00' },
+  recoBox: {
+    borderRadius: 14,
+    padding: 14,
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: '#e8e8f0',
+    gap: 6,
+  },
+  recoTitle: { fontWeight: '700', color: '#1b2653' },
+  recoItem: { color: '#394150' },
+  distWrap: { marginTop: 6, gap: 6 },
+  distRow: { flexDirection: 'row', justifyContent: 'space-between' },
+  distLabel: { fontWeight: '600', color: '#394150' },
+  distValue: { color: '#394150' },
+
+  privacyCard: {
+    marginTop: 16,
+    borderRadius: 16,
+    padding: 14,
+    backgroundColor: '#f1f5fb',
+    borderWidth: 1,
+    borderColor: '#d8deeb',
+    gap: 4,
+  },
+  privacyTitle: { fontWeight: '700', color: '#1b2653' },
+  privacyCopy: { color: '#4a5779', fontSize: 12 },
 });

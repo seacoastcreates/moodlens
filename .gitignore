@@ -66,6 +66,12 @@ Desktop.ini
 # Logs
 *.log
 
+# Python
+__pycache__/
+*.pyc
+.venv*/
+*.db
+
 # Environment variables
 .env
 .env.local

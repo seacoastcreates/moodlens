@@ -4,6 +4,7 @@ import { View, Text, StyleSheet, FlatList, Button, Alert } from 'react-native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../App';
 import { Audio } from 'expo-av';
+import { getRecommendationsForEmotion } from '../analytics';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Result'>;
 
@@ -23,6 +24,7 @@ export default function ResultScreen({ route }: Props) {
   (route.params as any).top_confidence ??
   (scores?.[0]?.score != null ? Math.round(scores[0].score * 100) : undefined);
   const hint = (route.params as any).hint;
+  const recommendations = getRecommendationsForEmotion(top_label);
   
   // --- audio playback state ---
   const soundRef = useRef<Audio.Sound | null>(null);
@@ -108,6 +110,17 @@ export default function ResultScreen({ route }: Props) {
 
       {hint ? <Text style={{ color: '#666', fontStyle: 'italic', marginTop: 8 }}>{hint}</Text> : null}
 
+      {recommendations ? (
+        <View style={styles.recoBox}>
+          <Text style={styles.recoTitle}>{recommendations.headline}</Text>
+          {recommendations.actions.map((action) => (
+            <Text key={action} style={styles.recoItem}>
+              • {action}
+            </Text>
+          ))}
+        </View>
+      ) : null}
+
 
       <Text style={styles.subheading}>Input</Text>
       <Text style={styles.text}>{text}</Text>
@@ -137,4 +150,15 @@ const styles = StyleSheet.create({
   badge: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, borderWidth: 1 },
   badgeNeutral: { backgroundColor: '#fff', borderColor: '#ddd' },
   badgeLabel: { fontWeight: '700', fontSize: 12, textTransform: 'uppercase', letterSpacing: 0.6 },
+  recoBox: {
+    marginTop: 16,
+    borderRadius: 14,
+    backgroundColor: '#f6f8ff',
+    borderWidth: 1,
+    borderColor: '#e2e7ff',
+    padding: 14,
+    gap: 6,
+  },
+  recoTitle: { fontWeight: '700', color: '#1b2653' },
+  recoItem: { color: '#394150' },
 });
