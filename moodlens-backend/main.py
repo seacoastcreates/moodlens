@@ -1,11 +1,13 @@
 from functools import lru_cache
-from typing import List
+from typing import List, Optional
 import json
 import io
+import os
+import secrets
 import numpy as np
 import librosa
 
-from fastapi import FastAPI, Depends, UploadFile, File, HTTPException
+from fastapi import FastAPI, Depends, Header, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -15,6 +17,17 @@ from scipy.stats import entropy
 from database import SessionLocal, engine, Base
 from models import HistoryEntry
 from schemas import HistoryCreate, HistoryOut
+
+# -------- API key gate --------
+# Shared-secret auth: keeps randoms on the LAN/internet from reading or
+# writing journal data. Not per-user auth - every client uses the same key.
+API_KEY = os.getenv("API_KEY")
+
+def require_api_key(x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")):
+    if not API_KEY:
+        raise HTTPException(status_code=500, detail="Server misconfigured: API_KEY is not set")
+    if not x_api_key or not secrets.compare_digest(x_api_key, API_KEY):
+        raise HTTPException(status_code=401, detail="Missing or invalid API key")
 
 # -------- Text sentiment / emotion --------
 @lru_cache(maxsize=1)
@@ -102,8 +115,8 @@ app = FastAPI(title="MoodLens API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # tighten later for prod
-    allow_credentials=True,
+    allow_origins=["*"],   # no cookies/credentials are used, so a wildcard is fine
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -123,7 +136,7 @@ def root():
     return {"status": "ok"}
 
 # -------- Text endpoint --------
-@app.post("/analyze", response_model=AnalyzeOut)
+@app.post("/analyze", response_model=AnalyzeOut, dependencies=[Depends(require_api_key)])
 def analyze(payload: AnalyzeIn):
     nlp = get_text_pipeline()
     outputs = nlp(payload.text)[0]  # list of {label, score}
@@ -202,7 +215,7 @@ def _entropy(scores: list[dict]) -> float:
     p = np.array([max(s["score"], eps) for s in scores], dtype=np.float64)
     return float(-np.sum(p * np.log(p)))
 
-@app.post("/analyze-audio")
+@app.post("/analyze-audio", dependencies=[Depends(require_api_key)])
 async def analyze_audio(file: UploadFile = File(...)):
     try:
         data = await file.read()
@@ -267,7 +280,7 @@ async def analyze_audio(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail=f"Audio processing failed: {e}")
 
 # -------- History: create + list (Postgres-backed) --------
-@app.post("/history", response_model=HistoryOut)
+@app.post("/history", response_model=HistoryOut, dependencies=[Depends(require_api_key)])
 def create_history(entry: HistoryCreate, db: Session = Depends(get_db)):
     obj = HistoryEntry(
         user_id=entry.user_id,
@@ -291,7 +304,7 @@ def create_history(entry: HistoryCreate, db: Session = Depends(get_db)):
         created_at=obj.created_at.isoformat() if obj.created_at else "",
     )
 
-@app.get("/history", response_model=List[HistoryOut])
+@app.get("/history", response_model=List[HistoryOut], dependencies=[Depends(require_api_key)])
 def list_history(user_id: str, limit: int = 50, db: Session = Depends(get_db)):
     q = (
         db.query(HistoryEntry)

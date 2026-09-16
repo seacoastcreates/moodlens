@@ -13,10 +13,13 @@ TEST_DB_PATH = BACKEND_DIR / "test_moodlens.db"
 TEST_DB_PATH.unlink(missing_ok=True)
 os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DB_PATH}"
 
+TEST_API_KEY = "test-api-key"
+os.environ["API_KEY"] = TEST_API_KEY
+
 import pytest
 from fastapi.testclient import TestClient
 
-import main  # noqa: E402 - must follow the DATABASE_URL override above
+import main  # noqa: E402 - must follow the env overrides above
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -27,4 +30,11 @@ def _cleanup_test_db():
 
 @pytest.fixture()
 def client():
+    """Authenticated client - most tests exercise behavior behind the API key gate."""
+    return TestClient(main.app, headers={"X-API-Key": TEST_API_KEY})
+
+
+@pytest.fixture()
+def anon_client():
+    """Unauthenticated client, for testing the gate itself."""
     return TestClient(main.app)

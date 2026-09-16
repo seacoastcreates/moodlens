@@ -42,9 +42,11 @@ A mobile app that uses machine learning to analyze your emotions from text, voic
    `cd moodlens-backend
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env   # fill in API_KEY (see moodlens-backend/README.md)
 uvicorn main:app --reload --port 8000`
 
 2. Start the app (Expo)
    `cd ../moodlens-frontend
 npm install
+cp .env.example .env   # EXPO_PUBLIC_API_KEY must match the backend's API_KEY
 npm run start`

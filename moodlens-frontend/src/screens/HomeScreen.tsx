@@ -14,7 +14,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFocusEffect } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../App';
-import { API_URL } from '../config';
+import { API_URL, apiHeaders } from '../config';
 import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system';
 import { fetchHistory, pushHistory } from '../sync';
@@ -117,7 +117,7 @@ export default function HomeScreen({ navigation }: Props) {
     try {
       const res = await fetch(`${API_URL}/analyze`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: apiHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ text }),
       });
       if (!res.ok) {
@@ -236,7 +236,7 @@ export default function HomeScreen({ navigation }: Props) {
 
       const res = await fetch(`${API_URL}/analyze-audio`, {
         method: 'POST',
-        headers: { 'Content-Type': 'multipart/form-data' },
+        headers: apiHeaders({ 'Content-Type': 'multipart/form-data' }),
         body: form,
       });
       if (!res.ok) {

@@ -1,7 +1,10 @@
 # database.py
 import os
+from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
+
+load_dotenv()
 
 # Examples:
 # postgresql+psycopg2://USER:PASSWORD@HOST:5432/DBNAME

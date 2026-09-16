@@ -14,3 +14,13 @@ const LOCAL_BASE =
 
 // Set EXPO_PUBLIC_API_URL in .env (physical device LAN IP, ngrok tunnel, etc).
 export const API_URL = process.env.EXPO_PUBLIC_API_URL || LOCAL_BASE;
+
+// Shared secret expected by the backend's require_api_key dependency (see
+// moodlens-backend/main.py). Note this only keeps out casual/anonymous
+// requests, not someone who inspects the built app - EXPO_PUBLIC_ values are
+// bundled into the JS in plain text, not truly secret.
+export const API_KEY = process.env.EXPO_PUBLIC_API_KEY ?? '';
+
+export function apiHeaders(extra?: Record<string, string>): Record<string, string> {
+  return { 'X-API-Key': API_KEY, ...extra };
+}

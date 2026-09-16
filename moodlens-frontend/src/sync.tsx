@@ -1,6 +1,6 @@
 // src/sync.ts
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { API_URL } from './config';
+import { API_URL, apiHeaders } from './config';
 
 // Get or create a stable user_id (persist in AsyncStorage)
 export async function getUserId(): Promise<string> {
@@ -33,7 +33,7 @@ export async function pushHistory(entry: {
 
   const res = await fetch(`${API_URL}/history`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: apiHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
@@ -46,7 +46,7 @@ export async function pushHistory(entry: {
 export async function fetchHistory(limit = 50) {
   const user_id = await getUserId();
   const url = `${API_URL}/history?user_id=${encodeURIComponent(user_id)}&limit=${limit}`;
-  const res = await fetch(url);
+  const res = await fetch(url, { headers: apiHeaders() });
   if (!res.ok) {
     const t = await res.text();
     throw new Error(`Fetch history failed (${res.status}): ${t}`);
