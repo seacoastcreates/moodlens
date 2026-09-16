@@ -18,4 +18,12 @@ npm install   # installs expo + react-native deps
 npm run start # launches Expo (press i for iOS simulator)
 ```
 
-Point `API_URL` in `src/config.ts` at the FastAPI server (`http://localhost:8000` when running locally).
+Set `EXPO_PUBLIC_API_URL` in `.env` to point at the FastAPI server (see `.env.example`) — `src/config.ts` falls back to a per-platform localhost/emulator address if it's unset.
+
+## Testing
+
+```bash
+npm test
+```
+
+Runs the Jest suite (currently `src/analytics.test.ts`, covering the insights/recommendation engine).
