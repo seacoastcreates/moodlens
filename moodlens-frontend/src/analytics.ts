@@ -20,12 +20,45 @@ export type InsightBundle = {
   todayMood?: string;
   todaySummary?: string;
   trendMessage?: string;
+  monthMessage?: string;
+  lunarMessage?: string;
+  headsUp?: string;
   alert?: string;
   distribution: { label: string; percent: number }[];
   recommendation?: Recommendation;
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+// -------- Lunar phase --------
+// Reference new moon: Jan 6, 2000 18:14 UTC. Synodic month length is the
+// average time between new moons. Together these let us estimate the phase
+// for any date without a network call - accurate to within a few hours,
+// which is plenty for a "does this correlate with mood" heuristic.
+const SYNODIC_MONTH_DAYS = 29.530588853;
+const KNOWN_NEW_MOON_MS = Date.UTC(2000, 0, 6, 18, 14, 0);
+
+export const LUNAR_PHASES = [
+  'New Moon',
+  'Waxing Crescent',
+  'First Quarter',
+  'Waxing Gibbous',
+  'Full Moon',
+  'Waning Gibbous',
+  'Last Quarter',
+  'Waning Crescent',
+] as const;
+
+export type LunarPhase = (typeof LUNAR_PHASES)[number];
+
+export function getLunarPhase(timestamp: number): LunarPhase {
+  const daysSinceNewMoon = (timestamp - KNOWN_NEW_MOON_MS) / DAY_MS;
+  const cyclePosition =
+    ((daysSinceNewMoon % SYNODIC_MONTH_DAYS) + SYNODIC_MONTH_DAYS) % SYNODIC_MONTH_DAYS;
+  const fraction = cyclePosition / SYNODIC_MONTH_DAYS;
+  const index = Math.floor(fraction * LUNAR_PHASES.length + 0.5) % LUNAR_PHASES.length;
+  return LUNAR_PHASES[index];
+}
 
 const POSITIVE_LABELS = new Set([
   'admiration',
@@ -261,6 +294,9 @@ export function computeInsights(entries: TimelineEntry[]): InsightBundle {
     .slice(0, 5);
 
   const trendMessage = buildTrendMessage(sorted);
+  const monthMessage = buildMonthMessage(sorted);
+  const lunarMessage = buildLunarMessage(sorted);
+  const headsUp = buildHeadsUpMessage(sorted);
   const alert = buildAlert(sorted);
 
   const latestLabel = sorted[0]?.topLabel;
@@ -271,6 +307,9 @@ export function computeInsights(entries: TimelineEntry[]): InsightBundle {
     todayMood: todayDominant,
     todaySummary,
     trendMessage,
+    monthMessage,
+    lunarMessage,
+    headsUp,
     alert,
     distribution,
     recommendation,
@@ -291,44 +330,145 @@ function formatTodaySummary(label: string, entries: TimelineEntry[]): string {
     : `Today is leaning toward ${label}.`;
 }
 
+type BucketStats = { neg: number; pos: number; total: number };
+
+function computeBucketStats<T>(
+  entries: TimelineEntry[],
+  bucketOf: (entry: TimelineEntry) => T
+): Map<T, BucketStats> {
+  const stats = new Map<T, BucketStats>();
+  for (const entry of entries) {
+    const key = bucketOf(entry);
+    if (!stats.has(key)) stats.set(key, { neg: 0, pos: 0, total: 0 });
+    const bucket = stats.get(key)!;
+    bucket.total += 1;
+    if (isNegative(entry.topLabel)) bucket.neg += 1;
+    else if (isPositive(entry.topLabel)) bucket.pos += 1;
+  }
+  return stats;
+}
+
+// Generic "does one bucket of entries skew positive/negative" detector, shared
+// by the day-of-week, month, and lunar-phase trend messages below. Buckets
+// under minSamples are ignored so a single loud entry can't drive a claim.
+function strongestBucketSignal<T>(
+  entries: TimelineEntry[],
+  bucketOf: (entry: TimelineEntry) => T,
+  minSamples = 2,
+  ratioThreshold = 0.55
+): { key: T; ratio: number; kind: 'positive' | 'negative' } | undefined {
+  const stats = computeBucketStats(entries, bucketOf);
+
+  let highestNeg: { key: T; ratio: number } | undefined;
+  let highestPos: { key: T; ratio: number } | undefined;
+
+  for (const [key, bucket] of stats.entries()) {
+    if (bucket.total < minSamples) continue;
+    const negRatio = bucket.neg / bucket.total;
+    const posRatio = bucket.pos / bucket.total;
+    if (!highestNeg || negRatio > highestNeg.ratio) highestNeg = { key, ratio: negRatio };
+    if (!highestPos || posRatio > highestPos.ratio) highestPos = { key, ratio: posRatio };
+  }
+
+  if (highestNeg && highestNeg.ratio >= ratioThreshold) {
+    return { key: highestNeg.key, ratio: highestNeg.ratio, kind: 'negative' };
+  }
+  if (highestPos && highestPos.ratio >= ratioThreshold) {
+    return { key: highestPos.key, ratio: highestPos.ratio, kind: 'positive' };
+  }
+  return undefined;
+}
+
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
 function buildTrendMessage(entries: TimelineEntry[]): string | undefined {
   const windowed = entries.filter((entry) => Date.now() - entry.timestamp <= 14 * DAY_MS);
   if (windowed.length < 4) {
     return 'Log a few more days to unlock weekly trend insights.';
   }
 
-  const stats = new Map<number, { neg: number; pos: number; total: number }>();
-  for (const entry of windowed) {
-    const day = new Date(entry.timestamp).getDay();
-    if (!stats.has(day)) stats.set(day, { neg: 0, pos: 0, total: 0 });
-    const bucket = stats.get(day)!;
-    bucket.total += 1;
-    if (isNegative(entry.topLabel)) bucket.neg += 1;
-    else if (isPositive(entry.topLabel)) bucket.pos += 1;
+  const signal = strongestBucketSignal(windowed, (e) => new Date(e.timestamp).getDay());
+
+  if (signal?.kind === 'negative') {
+    return `${DAY_NAMES[signal.key]}s have skewed toward heavier emotions—consider scheduling a lighter task or a break to soften the start.`;
   }
-
-  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-
-  let highestNeg: { day: number; ratio: number } | null = null;
-  let highestPos: { day: number; ratio: number } | null = null;
-
-  for (const [day, bucket] of stats.entries()) {
-    if (bucket.total < 2) continue;
-    const negRatio = bucket.neg / bucket.total;
-    const posRatio = bucket.pos / bucket.total;
-    if (!highestNeg || negRatio > highestNeg.ratio) highestNeg = { day, ratio: negRatio };
-    if (!highestPos || posRatio > highestPos.ratio) highestPos = { day, ratio: posRatio };
+  if (signal?.kind === 'positive') {
+    return `${DAY_NAMES[signal.key]}s consistently bring brighter moods—try bookmarking energizing activities there.`;
   }
-
-  if (highestNeg && highestNeg.ratio >= 0.55) {
-    return `${dayNames[highestNeg.day]}s have skewed toward heavier emotions—consider scheduling a lighter task or a break to soften the start.`;
-  }
-
-  if (highestPos && highestPos.ratio >= 0.55) {
-    return `${dayNames[highestPos.day]}s consistently bring brighter moods—try bookmarking energizing activities there.`;
-  }
-
   return 'Your mood has been fairly balanced across the week—keep noting what sustains that balance.';
+}
+
+const MONTH_NAMES = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
+
+// Needs entries spread across multiple calendar months (any year) before it
+// says anything - most new users won't see this for a while, which is fine.
+function buildMonthMessage(entries: TimelineEntry[]): string | undefined {
+  const signal = strongestBucketSignal(entries, (e) => new Date(e.timestamp).getMonth(), 3);
+  if (signal?.kind === 'negative') {
+    return `${MONTH_NAMES[signal.key]} has historically run heavier for you—worth planning extra support around that time of year.`;
+  }
+  if (signal?.kind === 'positive') {
+    return `${MONTH_NAMES[signal.key]} has historically been a brighter month for you.`;
+  }
+  return undefined;
+}
+
+// There's no scientific evidence linking lunar phase to mood - this is an
+// exploratory/fun lens, not a validated claim, so the copy says so.
+function buildLunarMessage(entries: TimelineEntry[]): string | undefined {
+  const signal = strongestBucketSignal(entries, (e) => getLunarPhase(e.timestamp));
+  if (signal?.kind === 'negative') {
+    return `Entries during the ${signal.key} have leaned heavier for you. There's no scientific link between lunar phase and mood, but if the pattern holds it might be worth watching.`;
+  }
+  if (signal?.kind === 'positive') {
+    return `Entries during the ${signal.key} have leaned brighter for you. There's no scientific link between lunar phase and mood, but if the pattern holds it might be worth watching.`;
+  }
+  return undefined;
+}
+
+function joinWithAnd(items: string[]): string {
+  if (items.length === 1) return items[0];
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return `${items.slice(0, -1).join(', ')}, and ${items[items.length - 1]}`;
+}
+
+// Phase-2 "predictive" feature: rather than forecasting a specific emotion (which
+// would need far more data than one person generates in months, or pooling data
+// across users - which breaks the privacy-first promise), this checks whether
+// *today's* calendar buckets (weekday/month/lunar phase) individually match a
+// pattern that has historically skewed negative in the user's own history. It's
+// a nudge grounded in their own past entries, not a validated forecast, and the
+// copy says so. Gated behind a much higher entry count than the individual
+// trend messages so it doesn't speak with false confidence off thin data.
+const MIN_ENTRIES_FOR_HEADS_UP = 30;
+
+function buildHeadsUpMessage(entries: TimelineEntry[]): string | undefined {
+  if (entries.length < MIN_ENTRIES_FOR_HEADS_UP) return undefined;
+
+  const now = Date.now();
+  const todayDay = new Date(now).getDay();
+  const todayMonth = new Date(now).getMonth();
+  const todayLunar = getLunarPhase(now);
+
+  const dayBucket = computeBucketStats(entries, (e) => new Date(e.timestamp).getDay()).get(todayDay);
+  const monthBucket = computeBucketStats(entries, (e) => new Date(e.timestamp).getMonth()).get(todayMonth);
+  const lunarBucket = computeBucketStats(entries, (e) => getLunarPhase(e.timestamp)).get(todayLunar);
+
+  const isHeavy = (bucket: BucketStats | undefined, minSamples: number) =>
+    !!bucket && bucket.total >= minSamples && bucket.neg / bucket.total >= 0.55;
+
+  const clauses: string[] = [];
+  if (isHeavy(dayBucket, 2)) clauses.push(`it's a ${DAY_NAMES[todayDay]}`);
+  if (isHeavy(monthBucket, 3)) clauses.push(`it's ${MONTH_NAMES[todayMonth]}`);
+  if (isHeavy(lunarBucket, 2)) clauses.push(`the moon is in its ${todayLunar} phase`);
+
+  if (!clauses.length) return undefined;
+
+  const subject = clauses.length === 1 ? 'that condition has' : 'those conditions have';
+  return `Heads up: ${joinWithAnd(clauses)} — ${subject} historically leaned heavier for you. This is a pattern in your own data, not a guarantee, so take it as a nudge rather than a forecast.`;
 }
 
 function buildAlert(entries: TimelineEntry[]): string | undefined {
@@ -349,7 +489,7 @@ function buildAlert(entries: TimelineEntry[]): string | undefined {
   }, {});
   const [label, count] = Object.entries(counts).sort((a, b) => b[1] - a[1])[0] ?? [];
   if (label && count >= 4 && isNegative(label)) {
-    return `Frequent ${label} signals a possible burnout cycle. Plan a deeper reset or talk with a friend/coach before it builds.`;
+    return `${label.charAt(0).toUpperCase()}${label.slice(1)} has come up often in your recent entries. It might be a good time for a deeper reset, or to talk it through with someone you trust.`;
   }
 
   if (entries.length >= 7) {

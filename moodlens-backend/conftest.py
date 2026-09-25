@@ -16,6 +16,9 @@ os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DB_PATH}"
 TEST_API_KEY = "test-api-key"
 os.environ["API_KEY"] = TEST_API_KEY
 
+TEST_TOKEN_SECRET = "test-token-secret"
+os.environ["TOKEN_SECRET"] = TEST_TOKEN_SECRET
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -38,3 +41,32 @@ def client():
 def anon_client():
     """Unauthenticated client, for testing the gate itself."""
     return TestClient(main.app)
+
+
+@pytest.fixture()
+def registered_client(client):
+    """A client that's also completed /register, with its bearer token attached -
+    for exercising the /history endpoints as a real device would."""
+    res = client.post("/register")
+    assert res.status_code == 200
+    token = res.json()["token"]
+    client.headers["Authorization"] = f"Bearer {token}"
+    return client
+
+
+def make_user_token(user_id: str) -> str:
+    """Sign a token for an arbitrary user_id, bypassing /register - lets tests
+    act as "some other user" without needing a second real registration."""
+    import hashlib
+    import hmac
+
+    mac = hmac.new(TEST_TOKEN_SECRET.encode(), user_id.encode(), hashlib.sha256).hexdigest()
+    return f"{user_id}.{mac}"
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limit():
+    """Rate-limit counters are module state; keep tests from sharing them."""
+    main._recent_calls.clear()
+    yield
+    main._recent_calls.clear()

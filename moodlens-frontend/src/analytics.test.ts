@@ -1,5 +1,6 @@
 import {
   computeInsights,
+  getLunarPhase,
   getRecommendationsForEmotion,
   TimelineEntry,
 } from './analytics';
@@ -92,5 +93,54 @@ describe('computeInsights', () => {
   it('attaches a recommendation based on the most recent entry', () => {
     const bundle = computeInsights([entry(0, 'anger'), entry(1, 'joy')]);
     expect(bundle.recommendation?.headline).toBe(getRecommendationsForEmotion('anger')?.headline);
+  });
+
+  it('does not surface a month message without enough spread across months', () => {
+    const bundle = computeInsights([entry(0, 'sadness'), entry(1, 'sadness')]);
+    expect(bundle.monthMessage).toBeUndefined();
+  });
+
+  it('does not surface a lunar message without enough entries in any phase', () => {
+    const bundle = computeInsights([entry(0, 'sadness')]);
+    expect(bundle.lunarMessage).toBeUndefined();
+  });
+
+  it('surfaces a heads-up when today\'s weekday skews negative and there are enough total entries', () => {
+    const entries: TimelineEntry[] = [
+      // Same weekday as "today" (exact multiples of 7 days ago), all heavy.
+      entry(0, 'sadness'),
+      entry(7, 'sadness'),
+      entry(14, 'sadness'),
+    ];
+    // Filler on other days to clear the 30-entry minimum without erasing the signal.
+    // Skip 7 and 14 - those daysAgo are already used above for the negative signal.
+    for (let i = 1; i <= 29; i++) {
+      if (i === 7 || i === 14) continue;
+      entries.push(entry(i, 'joy'));
+    }
+    const bundle = computeInsights(entries);
+    expect(bundle.entriesAnalyzed).toBe(30);
+    expect(bundle.headsUp).toMatch(/heads up/i);
+  });
+
+  it('does not surface a heads-up below the minimum entry count, even if today looks heavy', () => {
+    const bundle = computeInsights([entry(0, 'sadness'), entry(7, 'sadness'), entry(14, 'sadness')]);
+    expect(bundle.headsUp).toBeUndefined();
+  });
+});
+
+describe('getLunarPhase', () => {
+  it('identifies a known full moon (Jan 6, 2023 23:08 UTC)', () => {
+    expect(getLunarPhase(Date.UTC(2023, 0, 6, 23, 8, 0))).toBe('Full Moon');
+  });
+
+  it('identifies a known new moon (Jan 21, 2023 20:53 UTC)', () => {
+    expect(getLunarPhase(Date.UTC(2023, 0, 21, 20, 53, 0))).toBe('New Moon');
+  });
+
+  it('is periodic across a full synodic month', () => {
+    const start = Date.UTC(2023, 0, 6, 23, 8, 0);
+    const oneCycleLater = start + 29.530588853 * DAY_MS;
+    expect(getLunarPhase(oneCycleLater)).toBe(getLunarPhase(start));
   });
 });

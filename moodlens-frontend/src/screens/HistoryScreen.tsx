@@ -1,37 +1,26 @@
 // src/screens/HistoryScreen.tsx
 import React, { useCallback, useEffect, useState } from 'react';
 import { View, Text, StyleSheet, FlatList, RefreshControl, Pressable, Alert } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../App';
-import { fetchHistory, getUserId } from '../sync';
-import { API_URL } from '../config';
+import {
+  CloudEntry,
+  deleteCloudHistory,
+  fetchHistory,
+  LocalEntry,
+  loadLocalHistory,
+  mergeHistory,
+} from '../sync';
+import { colors, fonts, radii, spacing } from '../theme';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'History'>;
-
-type LocalEntry = {
-  ts: number;
-  mode: 'text' | 'voice';
-  text?: string | null;
-  fileUri?: string | null;
-  result: { top_label: string; scores: { label: string; score: number }[] };
-};
-
-type CloudEntry = {
-  id: number;
-  user_id: string;
-  mode: 'text' | 'voice';
-  text?: string | null;
-  file_url?: string | null;
-  top_label: string;
-  scores: { label: string; score: number }[];
-  created_at: string;
-};
 
 function ModeBadge({ mode }: { mode: 'text' | 'voice' }) {
   const label = mode === 'voice' ? 'Voice' : 'Text';
   return (
-    <View style={[styles.badge]}>
+    <View style={styles.badge}>
       <Text style={styles.badgeLabel}>{label}</Text>
     </View>
   );
@@ -42,29 +31,15 @@ export default function HistoryScreen({ navigation }: Props) {
   const [refreshing, setRefreshing] = useState(false);
 
   const load = useCallback(async () => {
-    // 1) local entries (backwards compatible)
-    const raw = await AsyncStorage.getItem('history');
-    const local: LocalEntry[] = raw ? JSON.parse(raw) : [];
-
-    // 2) cloud entries (mapped into local shape)
-    let cloudMapped: LocalEntry[] = [];
+    const local = await loadLocalHistory();
+    let cloud: CloudEntry[] = [];
     try {
-      const cloud: CloudEntry[] = await fetchHistory(50);
-      cloudMapped = cloud.map((c) => ({
-        ts: c.created_at ? Date.parse(c.created_at) : Date.now(),
-        mode: c.mode,
-        text: c.mode === 'text' ? (c.text ?? '') : null,
-        // if you later add /upload-audio and store file_url, we can stream it:
-        fileUri: c.file_url ? `${API_URL}${c.file_url}` : null,
-        result: { top_label: c.top_label, scores: c.scores },
-      }));
+      cloud = await fetchHistory(50);
     } catch (e) {
       // ignore cloud failures; show local only
       console.warn('cloud history fetch failed', e);
     }
-
-    // 3) merge + de-dupe (prefer newest by timestamp)
-    const merged = [...cloudMapped, ...local].sort((a, b) => (b.ts || 0) - (a.ts || 0));
+    const merged = mergeHistory(local, cloud);
     setItems(merged);
   }, []);
 
@@ -80,18 +55,34 @@ export default function HistoryScreen({ navigation }: Props) {
     setRefreshing(false);
   };
 
-  const clearHistory = async () => {
-    Alert.alert('Clear local history', 'This removes only local entries (cloud stays). Continue?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Clear',
-        style: 'destructive',
-        onPress: async () => {
-          await AsyncStorage.removeItem('history');
-          await load();
+  const deleteAllData = async () => {
+    Alert.alert(
+      'Delete all your data',
+      'This permanently deletes every entry from this device and from the MoodLens server. It cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete Everything',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              // Cloud first: if it fails, local stays intact so the user can
+              // retry and nothing looks deleted that isn't.
+              await deleteCloudHistory();
+              await AsyncStorage.removeItem('history');
+              await load();
+              Alert.alert('Deleted', 'All your entries have been removed.');
+            } catch (e) {
+              console.warn('delete failed', e);
+              Alert.alert(
+                "Couldn't delete",
+                'We could not reach the server, so nothing was deleted. Check your connection and try again.'
+              );
+            }
+          },
         },
-      },
-    ]);
+      ]
+    );
   };
 
   const openEntry = (e: LocalEntry) => {
@@ -118,7 +109,7 @@ export default function HistoryScreen({ navigation }: Props) {
           {item.mode === 'text' && item.text ? (
             <Text numberOfLines={2} style={styles.rowPreview}>{item.text}</Text>
           ) : item.fileUri ? (
-            <Text numberOfLines={1} style={styles.rowPreview}>{item.fileUri}</Text>
+            <Text numberOfLines={1} style={styles.rowPreview}>{item.fileUri.split('/').pop()}</Text>
           ) : null}
         </View>
       </Pressable>
@@ -126,43 +117,93 @@ export default function HistoryScreen({ navigation }: Props) {
   };
 
   return (
-    <View style={styles.container}>
-      <View style={styles.topBar}>
-        <Text style={styles.title}>History</Text>
-        <Pressable onPress={clearHistory} style={styles.clearBtn}>
-          <Text style={styles.clearBtnText}>Clear Local</Text>
-        </Pressable>
-      </View>
+    <LinearGradient
+      colors={[colors.background, colors.backgroundGradientMid, colors.backgroundGradientEnd]}
+      style={styles.flex}
+    >
+      <View style={styles.container}>
+        <View style={styles.topBar}>
+          <Text style={styles.subtitle}>Every reading you've asked for, kept safe.</Text>
+          <Pressable onPress={deleteAllData} style={styles.clearBtn}>
+            <Text style={styles.clearBtnText}>Delete All</Text>
+          </Pressable>
+        </View>
 
-      {items.length === 0 ? (
-        <View style={styles.emptyWrap}><Text style={styles.emptyText}>No entries yet.</Text></View>
-      ) : (
-        <FlatList
-          data={items}
-          keyExtractor={(it) => String(it.ts)}
-          renderItem={renderItem}
-          ItemSeparatorComponent={() => <View style={styles.sep} />}
-          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
-        />
-      )}
-    </View>
+        {items.length === 0 ? (
+          <View style={styles.emptyWrap}>
+            <Text style={styles.emptyGlyph}>☽ ✦ ☾</Text>
+            <Text style={styles.emptyText}>No readings yet.</Text>
+          </View>
+        ) : (
+          <FlatList
+            data={items}
+            keyExtractor={(it) => (it.cloudId != null ? `c${it.cloudId}` : `l${it.ts}`)}
+            renderItem={renderItem}
+            ItemSeparatorComponent={() => <View style={styles.sep} />}
+            refreshControl={
+              <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.gold} />
+            }
+          />
+        )}
+      </View>
+    </LinearGradient>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 16, backgroundColor: 'white' },
-  topBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
-  title: { fontSize: 24, fontWeight: '800' },
-  emptyWrap: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  emptyText: { color: '#666' },
-  row: { paddingVertical: 12, paddingHorizontal: 8, borderRadius: 10, backgroundColor: '#fafafa' },
+  flex: { flex: 1 },
+  container: { flex: 1, padding: spacing.lg },
+  topBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.md, gap: spacing.sm },
+  subtitle: {
+    flex: 1,
+    fontFamily: fonts.bodyRegular,
+    fontStyle: 'italic',
+    color: colors.textSecondary,
+    fontSize: 15,
+  },
+  emptyWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: spacing.sm },
+  emptyGlyph: { color: colors.goldDim, fontSize: 18, letterSpacing: 6 },
+  emptyText: { fontFamily: fonts.bodyRegular, fontStyle: 'italic', color: colors.textMuted },
+  row: {
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.md,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
   rowHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  rowTitle: { fontWeight: '800', fontSize: 16 },
-  rowMeta: { color: '#6a6a6a', fontSize: 12, marginTop: 2 },
-  rowPreview: { color: '#333', marginTop: 6 },
-  sep: { height: 10 },
-  badge: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999, borderWidth: 1, borderColor: '#ddd', backgroundColor: 'white' },
-  badgeLabel: { fontWeight: '700', fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.6 },
-  clearBtn: { paddingVertical: 6, paddingHorizontal: 10, borderWidth: 1, borderColor: '#ddd', borderRadius: 8, backgroundColor: 'white' },
-  clearBtnText: { fontWeight: '700' },
+  rowTitle: {
+    fontFamily: fonts.displaySemiBold,
+    fontSize: 16,
+    color: colors.goldBright,
+    textTransform: 'capitalize',
+  },
+  rowMeta: { fontFamily: fonts.bodyRegular, color: colors.textMuted, fontSize: 12, marginTop: 2 },
+  rowPreview: { fontFamily: fonts.body, color: colors.textSecondary, fontSize: 15, marginTop: 6 },
+  sep: { height: spacing.sm },
+  badge: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    borderColor: colors.gold,
+    backgroundColor: 'transparent',
+  },
+  badgeLabel: {
+    fontFamily: fonts.bodySemiBold,
+    fontSize: 11,
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    color: colors.goldBright,
+  },
+  clearBtn: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radii.pill,
+    backgroundColor: 'transparent',
+  },
+  clearBtnText: { fontFamily: fonts.bodySemiBold, fontSize: 13, color: colors.textSecondary },
 });

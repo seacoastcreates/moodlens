@@ -7,7 +7,8 @@ class Score(BaseModel):
     score: float
 
 class HistoryCreate(BaseModel):
-    user_id: str
+    # user_id is intentionally absent here - it's derived from the verified
+    # bearer token (see main.require_user), never taken from client input.
     mode: str
     text: Optional[str] = None
     file_url: Optional[str] = None

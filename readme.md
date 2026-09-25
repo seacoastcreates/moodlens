@@ -43,7 +43,12 @@ A mobile app that uses machine learning to analyze your emotions from text, voic
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env   # fill in API_KEY (see moodlens-backend/README.md)
-uvicorn main:app --reload --port 8000`
+uvicorn main:app --reload --host 0.0.0.0 --port 8000`
+
+   `--host 0.0.0.0` is required for a physical phone on the same Wi-Fi to
+   reach it — the default (`127.0.0.1`) only accepts connections from the
+   Mac itself, which is why the Simulator works without it but a real
+   device silently can't connect.
 
 2. Start the app (Expo)
    `cd ../moodlens-frontend

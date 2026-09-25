@@ -24,3 +24,55 @@ export const API_KEY = process.env.EXPO_PUBLIC_API_KEY ?? '';
 export function apiHeaders(extra?: Record<string, string>): Record<string, string> {
   return { 'X-API-Key': API_KEY, ...extra };
 }
+
+// The API scales to zero when idle, and a cold start (booting + loading the
+// models) can take ~70s - longer than iOS waits before failing a request.
+// wakeServer() starts that boot early (on launch/foreground) while the user
+// is still writing or recording; the response itself doesn't matter.
+export function wakeServer() {
+  fetch(`${API_URL}/`).catch(() => {});
+}
+
+// For the analyze calls: if the request fails at the network level (the
+// server was still booting and the connection timed out), retry once and
+// let the UI say it's waking up. HTTP errors (4xx/5xx) are not retried.
+export async function fetchWithWake(
+  url: string,
+  init: RequestInit,
+  onWaking?: () => void
+): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch {
+    onWaking?.();
+    return await fetch(url, init);
+  }
+}
+
+// A non-2xx API response. `detail` is the server's message, which is only
+// ever shown to users for 400s and 429s (the backend keeps those user-safe).
+export class ApiError extends Error {
+  constructor(public status: number, public detail: string | null) {
+    super(`API error ${status}`);
+  }
+}
+
+export async function apiError(res: Response): Promise<ApiError> {
+  let detail: string | null = null;
+  try {
+    const body = await res.json();
+    if (typeof body?.detail === 'string') detail = body.detail;
+  } catch {
+    // non-JSON body; no detail to surface
+  }
+  return new ApiError(res.status, detail);
+}
+
+export function friendlyErrorMessage(e: unknown): string {
+  if (e instanceof ApiError) {
+    if ((e.status === 400 || e.status === 429) && e.detail) return e.detail;
+    return 'Something went wrong on our end. Please try again in a moment.';
+  }
+  // fetch rejects (rather than returning a response) on network failures.
+  return "Couldn't reach MoodLens. Check your connection and try again.";
+}

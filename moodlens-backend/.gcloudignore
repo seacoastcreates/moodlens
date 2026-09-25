@@ -1,0 +1,8 @@
+# Only what the Dockerfile needs goes to Cloud Build.
+.gcloudignore
+.venv*/
+__pycache__/
+.pytest_cache/
+tests/
+*.db
+.env

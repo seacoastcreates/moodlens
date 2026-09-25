@@ -26,3 +26,27 @@ pytest
 Tests use a throwaway sqlite file (not the dev Postgres database) and mock
 the Hugging Face pipelines, so they don't require model downloads or a
 running Postgres instance.
+
+## Production deployment (Cloud Run)
+
+Live at `https://moodlens-api-536953926843.us-east1.run.app` (GCP project
+`moodlens-36dunes`, region `us-east1`). The privacy policy is served from the
+same service at `/privacy`.
+
+- **Image:** built by Cloud Build from the `Dockerfile`, which bakes both
+  models into the image. `.gcloudignore` keeps the local venv out of the upload.
+- **Secrets:** `API_KEY`, `TOKEN_SECRET`, and `DATABASE_URL` (Neon Postgres)
+  live in Secret Manager and are mounted as env vars. `DATABASE_URL` is pinned
+  to a version, so after rotating it, redeploy with
+  `--update-secrets=DATABASE_URL=DATABASE_URL:<new version>`.
+- **Scaling:** min 0 / max 2 instances (2 vCPU, 4GiB). Cold starts take about
+  70s because the server warms both models before serving. The Cloud Scheduler
+  job `moodlens-keep-warm` pings `/` every 10 minutes to keep an instance idle
+  and warm (idle instances aren't billed under request-based billing).
+
+Deploy a new version (bump the tag each time):
+
+```bash
+gcloud builds submit --tag us-east1-docker.pkg.dev/moodlens-36dunes/moodlens/api:vN --project=moodlens-36dunes
+gcloud run deploy moodlens-api --image=us-east1-docker.pkg.dev/moodlens-36dunes/moodlens/api:vN --region=us-east1 --project=moodlens-36dunes
+```

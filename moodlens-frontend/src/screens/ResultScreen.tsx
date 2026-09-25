@@ -1,17 +1,21 @@
 // src/screens/ResultScreen.tsx
-import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, StyleSheet, FlatList, Button, Alert } from 'react-native';
+import React from 'react';
+import { View, Text, StyleSheet, FlatList, Alert, ScrollView } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../App';
-import { Audio } from 'expo-av';
+import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import { getRecommendationsForEmotion } from '../analytics';
+import { colors, fonts, radii, spacing } from '../theme';
+import MysticButton from '../components/MysticButton';
+import OrnamentDivider from '../components/OrnamentDivider';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Result'>;
 
 function ModeBadge({ mode }: { mode?: 'text' | 'voice' }) {
   const label = mode === 'voice' ? 'Voice' : 'Text';
   return (
-    <View style={[styles.badge, styles.badgeNeutral]}>
+    <View style={styles.badge}>
       <Text style={styles.badgeLabel}>{label}</Text>
     </View>
   );
@@ -20,145 +24,203 @@ function ModeBadge({ mode }: { mode?: 'text' | 'voice' }) {
 export default function ResultScreen({ route }: Props) {
   const { text, top_label, scores, mode, fileUri } = route.params;
   const topPct =
-  // prefer server-provided value when present
-  (route.params as any).top_confidence ??
-  (scores?.[0]?.score != null ? Math.round(scores[0].score * 100) : undefined);
-  const hint = (route.params as any).hint;
+    // prefer server-provided value when present
+    (route.params as any).top_confidence ??
+    (scores?.[0]?.score != null ? Math.round(scores[0].score * 100) : undefined);
+  const hint = route.params.hint;
   const recommendations = getRecommendationsForEmotion(top_label);
-  
+
   // --- audio playback state ---
-  const soundRef = useRef<Audio.Sound | null>(null);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [isLoaded, setIsLoaded] = useState(false);
-
-  useEffect(() => {
-    return () => {
-      // unload on unmount
-      (async () => {
-        try {
-          if (soundRef.current) {
-            await soundRef.current.stopAsync().catch(() => {});
-            await soundRef.current.unloadAsync().catch(() => {});
-          }
-        } catch {}
-      })();
-    };
-  }, []);
-
-  const loadIfNeeded = async () => {
-    if (!fileUri) return;
-    if (isLoaded && soundRef.current) return;
-    try {
-      const { sound } = await Audio.Sound.createAsync({ uri: fileUri });
-      soundRef.current = sound;
-      setIsLoaded(true);
-      sound.setOnPlaybackStatusUpdate((status) => {
-        if (!status.isLoaded) return;
-        setIsPlaying(status.isPlaying);
-      });
-    } catch (e: any) {
-      Alert.alert('Audio error', e?.message ?? String(e));
-    }
-  };
+  const player = useAudioPlayer(fileUri || undefined);
+  const playerStatus = useAudioPlayerStatus(player);
 
   const onPlayPause = async () => {
     if (!fileUri) return;
-    await loadIfNeeded();
-    const sound = soundRef.current;
-    if (!sound) return;
-    const status = await sound.getStatusAsync();
-    if (!status.isLoaded) return;
-    if (status.isPlaying) {
-      await sound.pauseAsync();
-    } else {
-      await sound.playFromPositionAsync(0);
+    try {
+      if (playerStatus.playing) {
+        player.pause();
+      } else {
+        await player.seekTo(0);
+        player.play();
+      }
+    } catch (e: any) {
+      console.warn('playback failed', e);
+      Alert.alert("Couldn't play the clip", 'The recording may no longer be on this device.');
     }
   };
 
   return (
-    <View style={styles.container}>
-      <View style={styles.headerRow}>
-        <Text style={styles.heading}>Predicted Emotion</Text>
-        <ModeBadge mode={mode} />
-      </View>
-
-      <Text style={styles.top}>{top_label}</Text>
-
-      {mode === 'voice' && !!fileUri ? (
-        <View style={styles.voiceBar}>
-          <Text style={styles.muted} numberOfLines={1}>Source: {fileUri}</Text>
-          <Button title={isPlaying ? 'Pause' : 'Play'} onPress={onPlayPause} />
+    <LinearGradient
+      colors={[colors.background, colors.backgroundGradientMid, colors.backgroundGradientEnd]}
+      style={styles.flex}
+    >
+      <ScrollView contentContainerStyle={styles.container}>
+        <View style={styles.headerRow}>
+          <Text style={styles.eyebrow}>The Reading</Text>
+          <ModeBadge mode={mode} />
         </View>
-      ) : null}
 
-      <Text style={styles.subheading}>Breakdown</Text>
-      <Text style={styles.top}>
-        {top_label}
-        {typeof topPct === 'number' ? ` (${topPct}%)` : ''}
-      </Text>
+        <View style={styles.revealCard}>
+          <Text style={styles.revealLabel}>{top_label}</Text>
+          {typeof topPct === 'number' ? (
+            <Text style={styles.revealPct}>{topPct}% certainty</Text>
+          ) : null}
+          {hint ? <Text style={styles.hint}>{hint}</Text> : null}
+        </View>
 
-      <FlatList
-        data={scores}
-        keyExtractor={(item) => item.label}
-        renderItem={({ item }) => (
-          <View style={styles.row}>
-            <Text style={styles.label}>{item.label}</Text>
-            <Text>{(item.score * 100).toFixed(1)}%</Text>
-          </View>
-        )}
-      />
-
-      {hint ? <Text style={{ color: '#666', fontStyle: 'italic', marginTop: 8 }}>{hint}</Text> : null}
-
-      {recommendations ? (
-        <View style={styles.recoBox}>
-          <Text style={styles.recoTitle}>{recommendations.headline}</Text>
-          {recommendations.actions.map((action) => (
-            <Text key={action} style={styles.recoItem}>
-              • {action}
+        {mode === 'voice' && !!fileUri ? (
+          <View style={styles.voiceBar}>
+            <Text style={styles.muted} numberOfLines={1}>
+              ✦ Source: {fileUri.split('/').pop()}
             </Text>
-          ))}
-        </View>
-      ) : null}
+            <MysticButton
+              title={playerStatus.playing ? 'Pause' : 'Play Clip'}
+              onPress={onPlayPause}
+              variant="ghost"
+            />
+          </View>
+        ) : null}
 
+        <OrnamentDivider />
 
-      <Text style={styles.subheading}>Input</Text>
-      <Text style={styles.text}>{text}</Text>
-    </View>
+        <Text style={styles.subheading}>The Full Reading</Text>
+        <FlatList
+          data={scores}
+          keyExtractor={(item) => item.label}
+          scrollEnabled={false}
+          renderItem={({ item }) => {
+            const pct = Math.max(0, Math.min(100, item.score * 100));
+            return (
+              <View style={styles.row}>
+                <View style={styles.rowHeader}>
+                  <Text style={styles.label}>{item.label}</Text>
+                  <Text style={styles.scoreText}>{pct.toFixed(1)}%</Text>
+                </View>
+                <View style={styles.barTrack}>
+                  <View style={[styles.barFill, { width: `${pct}%` }]} />
+                </View>
+              </View>
+            );
+          }}
+        />
+
+        {recommendations ? (
+          <View style={styles.recoBox}>
+            <Text style={styles.recoTitle}>{recommendations.headline}</Text>
+            {recommendations.actions.map((action) => (
+              <Text key={action} style={styles.recoItem}>
+                ✦ {action}
+              </Text>
+            ))}
+          </View>
+        ) : null}
+
+        <OrnamentDivider />
+
+        <Text style={styles.subheading}>What You Shared</Text>
+        <Text style={styles.text}>{text}</Text>
+      </ScrollView>
+    </LinearGradient>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 20, backgroundColor: 'white' },
+  flex: { flex: 1 },
+  container: { padding: spacing.lg, gap: spacing.md },
+
   headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  heading: { fontSize: 20, fontWeight: '700' },
-  subheading: { fontSize: 16, fontWeight: '600', marginTop: 16, marginBottom: 8 },
-  top: { fontSize: 28, fontWeight: '800', marginTop: 6, marginBottom: 6 },
-  row: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: 8,
-    borderBottomColor: '#eee',
-    borderBottomWidth: 1,
+  eyebrow: {
+    fontFamily: fonts.displaySemiBold,
+    fontSize: 15,
+    letterSpacing: 2,
+    color: colors.goldDim,
+    textTransform: 'uppercase',
   },
-  label: { fontWeight: '600' },
-  text: { marginTop: 8, color: '#333' },
-  muted: { color: '#6a6a6a', fontSize: 12, marginBottom: 8 },
 
-  voiceBar: { gap: 8, marginBottom: 8 },
-
-  badge: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, borderWidth: 1 },
-  badgeNeutral: { backgroundColor: '#fff', borderColor: '#ddd' },
-  badgeLabel: { fontWeight: '700', fontSize: 12, textTransform: 'uppercase', letterSpacing: 0.6 },
-  recoBox: {
-    marginTop: 16,
-    borderRadius: 14,
-    backgroundColor: '#f6f8ff',
+  revealCard: {
+    alignItems: 'center',
+    gap: 4,
+    paddingVertical: spacing.xl,
+    paddingHorizontal: spacing.lg,
+    borderRadius: radii.xl,
     borderWidth: 1,
-    borderColor: '#e2e7ff',
-    padding: 14,
+    borderColor: colors.gold,
+    backgroundColor: colors.surface,
+  },
+  revealLabel: {
+    fontFamily: fonts.display,
+    fontSize: 34,
+    color: colors.goldBright,
+    letterSpacing: 1,
+    textTransform: 'capitalize',
+    textAlign: 'center',
+  },
+  revealPct: {
+    fontFamily: fonts.bodyRegular,
+    fontStyle: 'italic',
+    fontSize: 15,
+    color: colors.textSecondary,
+  },
+  hint: {
+    fontFamily: fonts.bodyRegular,
+    fontStyle: 'italic',
+    color: colors.textMuted,
+    fontSize: 13,
+    marginTop: spacing.xs,
+    textAlign: 'center',
+  },
+
+  subheading: {
+    fontFamily: fonts.displaySemiBold,
+    fontSize: 16,
+    color: colors.goldBright,
+    letterSpacing: 1,
+  },
+
+  row: { paddingVertical: spacing.xs, gap: 6 },
+  rowHeader: { flexDirection: 'row', justifyContent: 'space-between' },
+  label: { fontFamily: fonts.bodySemiBold, fontSize: 16, color: colors.textPrimary, textTransform: 'capitalize' },
+  scoreText: { fontFamily: fonts.bodySemiBold, fontSize: 14, color: colors.textSecondary },
+  barTrack: {
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: colors.surfaceRaised,
+    overflow: 'hidden',
+  },
+  barFill: {
+    height: '100%',
+    borderRadius: 3,
+    backgroundColor: colors.gold,
+  },
+
+  text: { fontFamily: fonts.body, fontSize: 16, color: colors.textSecondary },
+  muted: { fontFamily: fonts.bodyRegular, color: colors.textMuted, fontSize: 13 },
+
+  voiceBar: { gap: spacing.sm },
+
+  badge: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    borderColor: colors.gold,
+    backgroundColor: 'transparent',
+  },
+  badgeLabel: {
+    fontFamily: fonts.bodySemiBold,
+    fontSize: 12,
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    color: colors.goldBright,
+  },
+  recoBox: {
+    borderRadius: radii.md,
+    padding: spacing.md,
+    backgroundColor: colors.surfaceRaised,
+    borderLeftWidth: 3,
+    borderLeftColor: colors.gold,
     gap: 6,
   },
-  recoTitle: { fontWeight: '700', color: '#1b2653' },
-  recoItem: { color: '#394150' },
+  recoTitle: { fontFamily: fonts.bodySemiBold, fontSize: 16, color: colors.goldBright },
+  recoItem: { fontFamily: fonts.body, fontSize: 15, color: colors.textSecondary },
 });

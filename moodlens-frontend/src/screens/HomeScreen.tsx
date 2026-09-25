@@ -1,27 +1,62 @@
 // src/screens/HomeScreen.tsx
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import {
   View,
   Text,
   TextInput,
-  Button,
   StyleSheet,
   Alert,
   ActivityIndicator,
   Pressable,
+  KeyboardAvoidingView,
+  ScrollView,
+  Platform,
+  Linking,
 } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../App';
-import { API_URL, apiHeaders } from '../config';
-import { Audio } from 'expo-av';
-import * as FileSystem from 'expo-file-system';
-import { fetchHistory, pushHistory } from '../sync';
+import { API_URL, apiError, apiHeaders, fetchWithWake, friendlyErrorMessage } from '../config';
+import {
+  AudioQuality,
+  IOSOutputFormat,
+  requestRecordingPermissionsAsync,
+  setAudioModeAsync,
+  useAudioRecorder,
+  type RecordingOptions,
+} from 'expo-audio';
+import { File } from 'expo-file-system';
+import { fetchHistory, loadLocalHistory, mergeHistory, saveEntry, syncPending } from '../sync';
 import { computeInsights, InsightBundle, TimelineEntry } from '../analytics';
+import { colors, fonts, radii, spacing } from '../theme';
+import MysticButton from '../components/MysticButton';
+import OrnamentDivider from '../components/OrnamentDivider';
 
 type Mode = 'text' | 'voice';
 type Props = NativeStackScreenProps<RootStackParamList, 'Home'>;
+
+// 16kHz mono WAV matches what the backend's mood model expects.
+const WAV_RECORDING_OPTIONS: RecordingOptions = {
+  extension: '.wav',
+  sampleRate: 16000,
+  numberOfChannels: 1,
+  bitRate: 256000,
+  android: {
+    extension: '.wav',
+    outputFormat: 'default',
+    audioEncoder: 'default',
+  },
+  ios: {
+    extension: '.wav',
+    audioQuality: AudioQuality.HIGH,
+    outputFormat: IOSOutputFormat.LINEARPCM,
+    linearPCMBitDepth: 16,
+    linearPCMIsBigEndian: false,
+    linearPCMIsFloat: false,
+  },
+  web: {},
+};
 
 export default function HomeScreen({ navigation }: Props) {
   // --- Shared UI state ---
@@ -30,12 +65,16 @@ export default function HomeScreen({ navigation }: Props) {
   // --- Text mode state ---
   const [text, setText] = useState('');
   const [loadingText, setLoadingText] = useState(false);
+  const [inputFocused, setInputFocused] = useState(false);
 
   // --- Voice mode state ---
-  const recordingRef = useRef<Audio.Recording | null>(null);
+  const audioRecorder = useAudioRecorder(WAV_RECORDING_OPTIONS);
   const [isRecording, setIsRecording] = useState(false);
   const [loadingVoice, setLoadingVoice] = useState(false);
   const [lastRecordingUri, setLastRecordingUri] = useState<string | null>(null);
+
+  // Set when an analyze request is slow enough that the server is likely cold.
+  const [waking, setWaking] = useState(false);
 
   // --- Insight state ---
   const [insights, setInsights] = useState<InsightBundle | null>(null);
@@ -46,53 +85,28 @@ export default function HomeScreen({ navigation }: Props) {
     setLoadingInsights(true);
     setInsightsError(null);
     try {
-      const raw = await AsyncStorage.getItem('history');
-      const local: any[] = raw ? JSON.parse(raw) : [];
+      const local = await loadLocalHistory();
 
-      let cloud: any[] = [];
+      let cloud: Awaited<ReturnType<typeof fetchHistory>> = [];
       try {
+        await syncPending();
         cloud = await fetchHistory(75);
       } catch (err) {
         console.warn('History sync failed (non-blocking)', err);
       }
 
-      const timeline: TimelineEntry[] = [];
+      const timeline: TimelineEntry[] = mergeHistory(local, cloud)
+        .filter((e) => e.result?.top_label && !Number.isNaN(e.ts))
+        .map((e) => ({
+          timestamp: e.ts,
+          topLabel: String(e.result.top_label),
+          scores: (e.result.scores ?? [])
+            .filter((sc) => sc && typeof sc.label === 'string' && sc.score != null)
+            .map((sc) => ({ label: String(sc.label), score: Number(sc.score) })),
+          mode: e.mode ?? 'text',
+        }));
 
-      const normalizeScores = (scores: any): { label: string; score: number }[] =>
-        Array.isArray(scores)
-          ? scores
-              .filter((s: any) => s && typeof s.label === 'string' && s.score != null)
-              .map((s: any) => ({ label: String(s.label), score: Number(s.score) }))
-          : [];
-
-      const addEntry = (entry: any, isCloud = false) => {
-        const tsSource = isCloud ? entry.created_at : entry.ts;
-        const timestamp = typeof tsSource === 'number' ? tsSource : Date.parse(tsSource ?? '');
-        const topLabel = isCloud ? entry.top_label : entry.result?.top_label;
-        const scores = isCloud ? entry.scores : entry.result?.scores;
-        if (!topLabel || Number.isNaN(timestamp)) return;
-
-        timeline.push({
-          timestamp,
-          topLabel: String(topLabel),
-          scores: normalizeScores(scores),
-          mode: (isCloud ? entry.mode : entry.mode) ?? 'text',
-        });
-      };
-
-      local.forEach((entry) => addEntry(entry));
-      cloud.forEach((entry) => addEntry(entry, true));
-
-      const deduped = Array.from(
-        new Map(
-          timeline.map((entry) => [
-            `${Math.round(entry.timestamp)}-${entry.topLabel}-${entry.mode}`,
-            entry,
-          ])
-        ).values()
-      );
-
-      const bundle = computeInsights(deduped);
+      const bundle = computeInsights(timeline);
       setInsights(bundle);
     } catch (err: any) {
       setInsightsError(err?.message ?? 'Unable to load insights');
@@ -114,30 +128,22 @@ export default function HomeScreen({ navigation }: Props) {
       return;
     }
     setLoadingText(true);
+    // A warm server answers in a few seconds; past that, assume a cold start.
+    const wakeTimer = setTimeout(() => setWaking(true), 8000);
     try {
-      const res = await fetch(`${API_URL}/analyze`, {
-        method: 'POST',
-        headers: apiHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ text }),
-      });
-      if (!res.ok) {
-        const t = await res.text();
-        throw new Error(`Analyze failed (${res.status}): ${t}`);
-      }
+      const res = await fetchWithWake(
+        `${API_URL}/analyze`,
+        {
+          method: 'POST',
+          headers: apiHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ text }),
+        },
+        () => setWaking(true)
+      );
+      if (!res.ok) throw await apiError(res);
       const data = await res.json();
 
-      const entry = { ts: Date.now(), mode: 'text' as const, text, fileUri: null, result: data };
-      const existing = await AsyncStorage.getItem('history');
-      const history = existing ? JSON.parse(existing) : [];
-      history.unshift(entry);
-      await AsyncStorage.setItem('history', JSON.stringify(history));
-
-      await pushHistory({
-        mode: 'text',
-        text,
-        top_label: data.top_label,
-        scores: data.scores,
-      });
+      await saveEntry({ ts: Date.now(), mode: 'text', text, fileUri: null, result: data });
 
       refreshInsights();
 
@@ -149,70 +155,50 @@ export default function HomeScreen({ navigation }: Props) {
         fileUri: null,
       });
     } catch (e: any) {
-      Alert.alert('Error', e?.message ?? 'Failed to analyze text');
+      Alert.alert("Couldn't read that entry", friendlyErrorMessage(e));
     } finally {
+      clearTimeout(wakeTimer);
       setLoadingText(false);
+      setWaking(false);
     }
   };
 
   // ========= VOICE MODE =========
   const startRecording = async () => {
     try {
-      const { status } = await Audio.requestPermissionsAsync();
-      if (status !== 'granted') {
-        Alert.alert('Microphone permission required');
+      const { granted } = await requestRecordingPermissionsAsync();
+      if (!granted) {
+        Alert.alert(
+        'Microphone access needed',
+        'Turn on microphone access for MoodLens in Settings to record a voice entry.'
+      );
         return;
       }
 
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
-        staysActiveInBackground: false,
+      await setAudioModeAsync({
+        allowsRecording: true,
+        playsInSilentMode: true,
       });
 
-      const recording = new Audio.Recording();
-      await recording.prepareToRecordAsync({
-        android: {
-          extension: '.wav',
-          outputFormat: Audio.AndroidOutputFormat.DEFAULT,
-          audioEncoder: Audio.AndroidAudioEncoder.DEFAULT,
-          sampleRate: 16000,
-          numberOfChannels: 1,
-          bitRate: 256000,
-        },
-        ios: {
-          extension: '.wav',
-          audioQuality: Audio.IOSAudioQuality.HIGH,
-          sampleRate: 16000,
-          numberOfChannels: 1,
-          bitRate: 256000,
-          outputFormat: Audio.IOSOutputFormat.LINEARPCM,
-        },
-        web: {},
-      } as any);
-
-      await recording.startAsync();
-      recordingRef.current = recording;
+      await audioRecorder.prepareToRecordAsync();
+      audioRecorder.record();
       setIsRecording(true);
       setLastRecordingUri(null);
     } catch (e: any) {
-      Alert.alert('Error starting recording', e?.message ?? String(e));
+      console.warn('start recording failed', e);
+      Alert.alert("Couldn't start recording", 'Please try again.');
     }
   };
 
   const stopRecording = async () => {
     try {
-      const rec = recordingRef.current;
-      if (!rec) return;
-      await rec.stopAndUnloadAsync();
-      const uri = rec.getURI();
+      await audioRecorder.stop();
       setIsRecording(false);
-      setLastRecordingUri(uri ?? null);
+      setLastRecordingUri(audioRecorder.uri ?? null);
     } catch (e: any) {
       setIsRecording(false);
-      Alert.alert('Error stopping recording', e?.message ?? String(e));
-    } finally {
-      recordingRef.current = null;
+      console.warn('stop recording failed', e);
+      Alert.alert("Couldn't stop recording", 'Please try recording again.');
     }
   };
 
@@ -222,9 +208,11 @@ export default function HomeScreen({ navigation }: Props) {
       return;
     }
     setLoadingVoice(true);
+    // A warm server answers in a few seconds; past that, assume a cold start.
+    const wakeTimer = setTimeout(() => setWaking(true), 8000);
     try {
-      const info = await FileSystem.getInfoAsync(lastRecordingUri);
-      if (!info.exists) throw new Error('Recorded file not found');
+      const recordedFile = new File(lastRecordingUri);
+      if (!recordedFile.exists) throw new Error('Recorded file not found');
 
       const form = new FormData();
       // @ts-ignore React Native FormData file shape
@@ -234,34 +222,24 @@ export default function HomeScreen({ navigation }: Props) {
         type: 'audio/wav',
       });
 
-      const res = await fetch(`${API_URL}/analyze-audio`, {
-        method: 'POST',
-        headers: apiHeaders({ 'Content-Type': 'multipart/form-data' }),
-        body: form,
-      });
-      if (!res.ok) {
-        const t = await res.text();
-        throw new Error(`Analyze failed (${res.status}): ${t}`);
-      }
+      const res = await fetchWithWake(
+        `${API_URL}/analyze-audio`,
+        {
+          method: 'POST',
+          headers: apiHeaders({ 'Content-Type': 'multipart/form-data' }),
+          body: form,
+        },
+        () => setWaking(true)
+      );
+      if (!res.ok) throw await apiError(res);
       const data = await res.json();
 
-      const entry = {
+      await saveEntry({
         ts: Date.now(),
-        mode: 'voice' as const,
+        mode: 'voice',
         text: null,
         fileUri: lastRecordingUri,
         result: data,
-      };
-      const existing = await AsyncStorage.getItem('history');
-      const history = existing ? JSON.parse(existing) : [];
-      history.unshift(entry);
-      await AsyncStorage.setItem('history', JSON.stringify(history));
-
-      await pushHistory({
-        mode: 'voice',
-        text: null,
-        top_label: data.top_label,
-        scores: data.scores,
       });
 
       refreshInsights();
@@ -272,11 +250,14 @@ export default function HomeScreen({ navigation }: Props) {
         scores: data.scores,
         mode: 'voice',
         fileUri: lastRecordingUri,
+        hint: data.hint ?? null,
       });
     } catch (e: any) {
-      Alert.alert('Upload error', e?.message ?? String(e));
+      Alert.alert("Couldn't read that clip", friendlyErrorMessage(e));
     } finally {
+      clearTimeout(wakeTimer);
       setLoadingVoice(false);
+      setWaking(false);
     }
   };
 
@@ -300,16 +281,20 @@ export default function HomeScreen({ navigation }: Props) {
 
   const renderTextUI = () => (
     <View style={styles.card}>
-      <Text style={styles.subtitle}>Type a quick journal note and get an emotion read.</Text>
+      <Text style={styles.subtitle}>Speak your mind, and let the reading begin.</Text>
       <TextInput
-        style={styles.input}
+        style={[styles.input, inputFocused && styles.inputFocused]}
         placeholder="How are you feeling today?"
+        placeholderTextColor={colors.textMuted}
         multiline
         value={text}
         onChangeText={setText}
+        onFocus={() => setInputFocused(true)}
+        onBlur={() => setInputFocused(false)}
         textAlignVertical="top"
       />
-      {loadingText ? <ActivityIndicator /> : <Button title="Analyze Text" onPress={analyzeText} />}
+      <MysticButton title="Reveal My Mood" onPress={analyzeText} loading={loadingText} />
+      {loadingText && waking ? <WakingNote /> : null}
     </View>
   );
 
@@ -317,47 +302,99 @@ export default function HomeScreen({ navigation }: Props) {
     <View style={styles.card}>
       <Text style={styles.subtitle}>Record a short voice clip (2–6 seconds works best).</Text>
       {!isRecording ? (
-        <Button title="Start Recording" onPress={startRecording} />
+        <MysticButton title="Start Recording" onPress={startRecording} />
       ) : (
-        <Button title="Stop Recording" onPress={stopRecording} />
+        <MysticButton title="Stop Recording" onPress={stopRecording} variant="ghost" />
       )}
-      <View style={{ height: 12 }} />
-      {lastRecordingUri ? <Text style={styles.muted}>Recorded: {lastRecordingUri}</Text> : null}
-      {loadingVoice ? (
-        <ActivityIndicator />
-      ) : (
-        <Button
-          title="Analyze Voice"
-          onPress={uploadRecording}
-          disabled={!lastRecordingUri || isRecording}
-        />
-      )}
+      {lastRecordingUri ? (
+        <Text style={styles.muted} numberOfLines={1}>
+          ✦ Captured: {lastRecordingUri.split('/').pop()}
+        </Text>
+      ) : null}
+      <MysticButton
+        title="Reveal My Mood"
+        onPress={uploadRecording}
+        loading={loadingVoice}
+        disabled={!lastRecordingUri || isRecording}
+      />
+      {loadingVoice && waking ? <WakingNote /> : null}
     </View>
   );
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>MoodLens</Text>
-      <Text style={styles.subtitleLead}>Track how you feel across text, voice, and more.</Text>
+    <LinearGradient
+      colors={[colors.background, colors.backgroundGradientMid, colors.backgroundGradientEnd]}
+      style={styles.flex}
+    >
+      <KeyboardAvoidingView
+        style={styles.flex}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
+        <ScrollView
+          contentContainerStyle={styles.container}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="interactive"
+        >
+          <Text style={styles.eyebrow}>✦ ✧ ✦</Text>
+          <Text style={styles.title}>MoodLens</Text>
+          <Text style={styles.subtitleLead}>A quiet reading of what you carry today.</Text>
 
-      <View style={styles.topRow}>
-        {renderToggle()}
-        <Pressable style={styles.historyBtn} onPress={() => navigation.navigate('History')}>
-          <Text style={styles.historyBtnText}>History</Text>
-        </Pressable>
-      </View>
+          <View style={styles.topRow}>
+            {renderToggle()}
+            <Pressable style={styles.historyBtn} onPress={() => navigation.navigate('History')}>
+              <Text style={styles.historyBtnText}>☽ Readings</Text>
+            </Pressable>
+          </View>
 
-      <InsightsPanel loading={loadingInsights} error={insightsError} insights={insights} />
+          <InsightsPanel loading={loadingInsights} error={insightsError} insights={insights} />
 
-      {mode === 'text' ? renderTextUI() : renderVoiceUI()}
+          {mode === 'text' ? renderTextUI() : renderVoiceUI()}
 
-      <View style={styles.privacyCard}>
-        <Text style={styles.privacyTitle}>Privacy first</Text>
-        <Text style={styles.privacyCopy}>
-          Text entries stay local until you sync. Voice clips remain on device unless you choose to
-          upload. You’re in control of what reaches the cloud.
-        </Text>
-      </View>
+          <View style={styles.privacyCard}>
+            <Text style={styles.privacyTitle}>Kept in confidence</Text>
+            <Text style={styles.privacyCopy}>
+              Entries are sent to the MoodLens server to be read. Your written entries and their
+              readings are saved to a private history tied to an anonymous ID on this device — no name, email, or account.
+              Voice clips are analyzed and not stored on the server. You can delete everything at any
+              time from Readings.
+            </Text>
+          </View>
+
+          <View style={styles.privacyCard}>
+            <Text style={styles.privacyTitle}>Not medical care</Text>
+            <Text style={styles.privacyCopy}>
+              MoodLens is a reflection tool, not a medical device or a substitute for professional
+              help. Its readings can be wrong.
+            </Text>
+            <CrisisLinks />
+          </View>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </LinearGradient>
+  );
+}
+
+function WakingNote() {
+  return (
+    <Text style={styles.muted}>
+      ☾ Waking up the oracle — the first reading after a quiet spell can take a minute or two.
+    </Text>
+  );
+}
+
+// US crisis line; shown with the disclaimer and on every heavy-mood alert.
+function CrisisLinks() {
+  return (
+    <View style={styles.crisisRow}>
+      <Text style={styles.privacyCopy}>In crisis or thinking about self-harm? In the US, </Text>
+      <Pressable onPress={() => Linking.openURL('tel:988')} hitSlop={8}>
+        <Text style={styles.crisisLink}>call 988</Text>
+      </Pressable>
+      <Text style={styles.privacyCopy}> or </Text>
+      <Pressable onPress={() => Linking.openURL('sms:988')} hitSlop={8}>
+        <Text style={styles.crisisLink}>text 988</Text>
+      </Pressable>
+      <Text style={styles.privacyCopy}>. Elsewhere, contact your local emergency number.</Text>
     </View>
   );
 }
@@ -372,8 +409,8 @@ function InsightsPanel({ loading, error, insights }: InsightsProps) {
   if (loading) {
     return (
       <View style={styles.insightsCard}>
-        <ActivityIndicator />
-        <Text style={styles.insightsMuted}>Crunching your mood trends…</Text>
+        <ActivityIndicator color={colors.gold} />
+        <Text style={styles.insightsMuted}>Reading the signs…</Text>
       </View>
     );
   }
@@ -381,7 +418,7 @@ function InsightsPanel({ loading, error, insights }: InsightsProps) {
   if (error) {
     return (
       <View style={styles.insightsCardError}>
-        <Text style={styles.insightsErrorTitle}>Insights unavailable</Text>
+        <Text style={styles.insightsErrorTitle}>The reading is unclear</Text>
         <Text style={styles.insightsErrorCopy}>{error}</Text>
       </View>
     );
@@ -390,7 +427,7 @@ function InsightsPanel({ loading, error, insights }: InsightsProps) {
   if (!insights || insights.entriesAnalyzed === 0) {
     return (
       <View style={styles.insightsCard}>
-        <Text style={styles.insightsTitle}>Daily mood insights</Text>
+        <Text style={styles.insightsTitle}>Daily Reading</Text>
         <Text style={styles.insightsMuted}>
           Capture a few entries to unlock personalized trends, recommendations, and gentle alerts.
         </Text>
@@ -402,17 +439,30 @@ function InsightsPanel({ loading, error, insights }: InsightsProps) {
 
   return (
     <View style={styles.insightsCard}>
-      <Text style={styles.insightsTitle}>Daily mood insights</Text>
+      <Text style={styles.insightsTitle}>Daily Reading</Text>
       {insights.todaySummary ? (
         <Text style={styles.insightsPrimary}>{insights.todaySummary}</Text>
       ) : null}
       {insights.trendMessage ? (
         <Text style={styles.insightsBody}>{insights.trendMessage}</Text>
       ) : null}
+      {insights.monthMessage ? (
+        <Text style={styles.insightsBody}>{insights.monthMessage}</Text>
+      ) : null}
+      {insights.lunarMessage ? (
+        <Text style={styles.insightsMuted}>☾ {insights.lunarMessage}</Text>
+      ) : null}
+      {insights.headsUp ? (
+        <View style={styles.headsUpBox}>
+          <Text style={styles.headsUpTitle}>✦ Today's Outlook</Text>
+          <Text style={styles.headsUpCopy}>{insights.headsUp}</Text>
+        </View>
+      ) : null}
       {insights.alert ? (
         <View style={styles.alertBox}>
-          <Text style={styles.alertTitle}>Predictive alert</Text>
+          <Text style={styles.alertTitle}>✦ A Gentle Check-In</Text>
           <Text style={styles.alertCopy}>{insights.alert}</Text>
+          <CrisisLinks />
         </View>
       ) : null}
 
@@ -421,139 +471,204 @@ function InsightsPanel({ loading, error, insights }: InsightsProps) {
           <Text style={styles.recoTitle}>{recommendation.headline}</Text>
           {recommendation.actions.map((action) => (
             <Text style={styles.recoItem} key={action}>
-              • {action}
+              ✦ {action}
             </Text>
           ))}
         </View>
       ) : null}
 
       {insights.distribution.length ? (
-        <View style={styles.distWrap}>
-          {insights.distribution.map((item) => (
-            <View key={item.label} style={styles.distRow}>
-              <Text style={styles.distLabel}>{item.label}</Text>
-              <Text style={styles.distValue}>{item.percent}%</Text>
-            </View>
-          ))}
-        </View>
+        <>
+          <OrnamentDivider />
+          <View style={styles.distWrap}>
+            {insights.distribution.map((item) => (
+              <View key={item.label} style={styles.distRow}>
+                <Text style={styles.distLabel}>{item.label}</Text>
+                <Text style={styles.distValue}>{item.percent}%</Text>
+              </View>
+            ))}
+          </View>
+        </>
       ) : null}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 20, gap: 16, backgroundColor: 'white' },
-  title: { fontSize: 32, fontWeight: '800' },
-  subtitleLead: { color: '#4d4d4d', marginBottom: 8 },
+  flex: { flex: 1 },
+  container: { flexGrow: 1, padding: spacing.lg, gap: spacing.lg },
+
+  eyebrow: {
+    textAlign: 'center',
+    color: colors.goldDim,
+    fontSize: 14,
+    letterSpacing: 4,
+    marginTop: spacing.sm,
+  },
+  title: {
+    textAlign: 'center',
+    fontFamily: fonts.display,
+    fontSize: 34,
+    color: colors.goldBright,
+    letterSpacing: 2,
+  },
+  subtitleLead: {
+    textAlign: 'center',
+    fontFamily: fonts.bodyRegular,
+    fontStyle: 'italic',
+    color: colors.textSecondary,
+    fontSize: 16,
+    marginBottom: spacing.sm,
+  },
   topRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
 
   card: {
     borderWidth: 1,
-    borderColor: '#eee',
-    borderRadius: 12,
-    padding: 16,
-    gap: 12,
-    backgroundColor: '#fafafa',
+    borderColor: colors.border,
+    borderRadius: radii.lg,
+    padding: spacing.lg,
+    gap: spacing.md,
+    backgroundColor: colors.surface,
   },
-  subtitle: { color: '#333' },
+  subtitle: {
+    fontFamily: fonts.bodyRegular,
+    fontStyle: 'italic',
+    color: colors.textSecondary,
+    fontSize: 16,
+  },
   input: {
-    borderColor: '#ccc',
+    borderColor: colors.border,
     borderWidth: 1,
-    borderRadius: 8,
-    padding: 12,
+    borderRadius: radii.md,
+    padding: spacing.md,
     minHeight: 120,
-    backgroundColor: 'white',
+    backgroundColor: colors.surfaceRaised,
+    color: colors.textPrimary,
+    fontFamily: fonts.body,
+    fontSize: 16,
+  },
+  inputFocused: {
+    borderColor: colors.gold,
   },
 
   toggleWrap: {
     flexDirection: 'row',
-    backgroundColor: '#f1f1f1',
-    borderRadius: 10,
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
     padding: 4,
     alignSelf: 'flex-start',
     gap: 6,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
   toggleBtn: {
     paddingVertical: 8,
-    paddingHorizontal: 14,
-    borderRadius: 8,
+    paddingHorizontal: 16,
+    borderRadius: radii.sm,
   },
   toggleBtnActive: {
-    backgroundColor: 'white',
-    borderWidth: 1,
-    borderColor: '#ddd',
+    backgroundColor: colors.gold,
   },
-  toggleLabel: { fontWeight: '600', color: '#666' },
-  toggleLabelActive: { color: '#111' },
+  toggleLabel: {
+    fontFamily: fonts.bodySemiBold,
+    fontSize: 15,
+    color: colors.textSecondary,
+  },
+  toggleLabelActive: { color: colors.textOnGold },
 
-  muted: { color: '#666', fontSize: 12 },
+  muted: { color: colors.textMuted, fontSize: 13, fontFamily: fonts.bodyRegular },
 
   historyBtn: {
     paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 8,
+    paddingHorizontal: 14,
+    borderRadius: radii.pill,
     borderWidth: 1,
-    borderColor: '#ddd',
-    backgroundColor: 'white',
+    borderColor: colors.gold,
+    backgroundColor: 'transparent',
   },
-  historyBtnText: { fontWeight: '700' },
+  historyBtnText: { fontFamily: fonts.bodySemiBold, fontSize: 15, color: colors.goldBright },
 
   insightsCard: {
-    borderRadius: 18,
+    borderRadius: radii.xl,
     borderWidth: 1,
-    borderColor: '#e3e3e7',
-    padding: 18,
-    gap: 10,
-    backgroundColor: '#f8f9ff',
+    borderColor: colors.border,
+    padding: spacing.lg,
+    gap: spacing.sm,
+    backgroundColor: colors.surface,
   },
   insightsCardError: {
-    borderRadius: 18,
+    borderRadius: radii.xl,
     borderWidth: 1,
-    borderColor: '#f5c4c4',
-    padding: 18,
-    gap: 8,
-    backgroundColor: '#fff6f6',
+    borderColor: colors.danger,
+    padding: spacing.lg,
+    gap: spacing.xs,
+    backgroundColor: colors.dangerBg,
   },
-  insightsTitle: { fontWeight: '700', fontSize: 18 },
-  insightsPrimary: { fontWeight: '600', color: '#1f2933' },
-  insightsBody: { color: '#394150' },
-  insightsMuted: { color: '#6a738b' },
-  insightsErrorTitle: { fontWeight: '700', color: '#a11a1a' },
-  insightsErrorCopy: { color: '#8a2121' },
+  insightsTitle: {
+    fontFamily: fonts.displaySemiBold,
+    fontSize: 18,
+    color: colors.goldBright,
+    letterSpacing: 1,
+  },
+  insightsPrimary: { fontFamily: fonts.bodySemiBold, fontSize: 17, color: colors.textPrimary },
+  insightsBody: { fontFamily: fonts.body, fontSize: 16, color: colors.textSecondary },
+  insightsMuted: { fontFamily: fonts.bodyRegular, fontStyle: 'italic', fontSize: 14, color: colors.textMuted },
+  insightsErrorTitle: { fontFamily: fonts.bodySemiBold, fontSize: 16, color: colors.danger },
+  insightsErrorCopy: { fontFamily: fonts.body, color: colors.textSecondary },
+
   alertBox: {
-    backgroundColor: '#fff3cd',
-    borderRadius: 12,
-    padding: 12,
+    backgroundColor: colors.amberGlowBg,
+    borderRadius: radii.md,
+    padding: spacing.md,
     gap: 4,
     borderWidth: 1,
-    borderColor: '#ffe9a7',
+    borderColor: colors.amberGlowBorder,
   },
-  alertTitle: { fontWeight: '700', color: '#835200' },
-  alertCopy: { color: '#7a5c00' },
-  recoBox: {
-    borderRadius: 14,
-    padding: 14,
-    backgroundColor: '#ffffff',
+  alertTitle: { fontFamily: fonts.bodySemiBold, fontSize: 15, color: colors.amberGlowBorder },
+  alertCopy: { fontFamily: fonts.body, fontSize: 15, color: colors.amberGlowText },
+
+  headsUpBox: {
+    backgroundColor: colors.violetGlowBg,
+    borderRadius: radii.md,
+    padding: spacing.md,
+    gap: 4,
     borderWidth: 1,
-    borderColor: '#e8e8f0',
+    borderColor: colors.violetGlowBorder,
+  },
+  headsUpTitle: { fontFamily: fonts.bodySemiBold, fontSize: 15, color: colors.violetGlowBorder },
+  headsUpCopy: { fontFamily: fonts.body, fontSize: 15, color: colors.violetGlowText },
+
+  recoBox: {
+    borderRadius: radii.md,
+    padding: spacing.md,
+    backgroundColor: colors.surfaceRaised,
+    borderLeftWidth: 3,
+    borderLeftColor: colors.gold,
     gap: 6,
   },
-  recoTitle: { fontWeight: '700', color: '#1b2653' },
-  recoItem: { color: '#394150' },
-  distWrap: { marginTop: 6, gap: 6 },
+  recoTitle: { fontFamily: fonts.bodySemiBold, fontSize: 16, color: colors.goldBright },
+  recoItem: { fontFamily: fonts.body, fontSize: 15, color: colors.textSecondary },
+
+  distWrap: { gap: spacing.xs },
   distRow: { flexDirection: 'row', justifyContent: 'space-between' },
-  distLabel: { fontWeight: '600', color: '#394150' },
-  distValue: { color: '#394150' },
+  distLabel: { fontFamily: fonts.bodySemiBold, fontSize: 15, color: colors.textSecondary },
+  distValue: { fontFamily: fonts.bodySemiBold, fontSize: 15, color: colors.goldBright },
 
   privacyCard: {
-    marginTop: 16,
-    borderRadius: 16,
-    padding: 14,
-    backgroundColor: '#f1f5fb',
+    borderRadius: radii.lg,
+    padding: spacing.md,
+    backgroundColor: 'transparent',
     borderWidth: 1,
-    borderColor: '#d8deeb',
+    borderColor: colors.goldDim,
     gap: 4,
   },
-  privacyTitle: { fontWeight: '700', color: '#1b2653' },
-  privacyCopy: { color: '#4a5779', fontSize: 12 },
+  privacyTitle: { fontFamily: fonts.bodySemiBold, fontSize: 14, color: colors.goldDim },
+  privacyCopy: { fontFamily: fonts.bodyRegular, color: colors.textMuted, fontSize: 13 },
+  crisisRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', marginTop: spacing.xs },
+  crisisLink: {
+    fontFamily: fonts.bodySemiBold,
+    fontSize: 13,
+    color: colors.goldBright,
+    textDecorationLine: 'underline',
+  },
 });
