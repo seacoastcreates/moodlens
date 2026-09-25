@@ -21,7 +21,11 @@
       "blockedPermissions": [
         "android.permission.FOREGROUND_SERVICE",
         "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
-      ]
+      ],
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/splash-icon.png",
+        "backgroundColor": "#120e28"
+      }
     },
     "plugins": [
       [
@@ -36,6 +40,8 @@
       [
         "expo-splash-screen",
         {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 220,
           "backgroundColor": "#120e28",
           "resizeMode": "contain"
         }
