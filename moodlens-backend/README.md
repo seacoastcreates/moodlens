@@ -31,7 +31,7 @@ running Postgres instance.
 
 Live at `https://moodlens-api-536953926843.us-east1.run.app` (GCP project
 `moodlens-36dunes`, region `us-east1`). The privacy policy is served from the
-same service at `/privacy`.
+same service at `/privacy`, and the support page at `/support`.
 
 - **Image:** built by Cloud Build from the `Dockerfile`, which bakes both
   models into the image. `.gcloudignore` keeps the local venv out of the upload.

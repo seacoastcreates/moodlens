@@ -231,6 +231,13 @@ PRIVACY_HTML = Path(__file__).resolve().parent / "privacy.html"
 def privacy():
     return PRIVACY_HTML.read_text(encoding="utf-8")
 
+# Public too: App Store Connect also requires a support URL.
+SUPPORT_HTML = Path(__file__).resolve().parent / "support.html"
+
+@app.get("/support", response_class=HTMLResponse)
+def support():
+    return SUPPORT_HTML.read_text(encoding="utf-8")
+
 @app.post("/register", response_model=RegisterOut, dependencies=[Depends(require_api_key)])
 def register():
     if not TOKEN_SECRET:

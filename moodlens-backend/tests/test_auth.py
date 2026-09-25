@@ -82,3 +82,9 @@ def test_privacy_policy_is_public(anon_client):
     res = anon_client.get("/privacy")
     assert res.status_code == 200
     assert "Privacy Policy" in res.text
+
+
+def test_support_page_is_public(anon_client):
+    res = anon_client.get("/support")
+    assert res.status_code == 200
+    assert "MoodLens Support" in res.text

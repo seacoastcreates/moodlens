@@ -17,7 +17,7 @@ WORKDIR /home/user/app
 COPY --chown=user requirements.txt .
 RUN pip install --no-cache-dir --user -r requirements.txt
 
-COPY --chown=user main.py database.py models.py schemas.py privacy.html ./
+COPY --chown=user main.py database.py models.py schemas.py privacy.html support.html ./
 
 # Bake both models into the image so a cold start loads from disk instead of
 # downloading ~1.5GB. Uses the app's own loaders so the cached files are
