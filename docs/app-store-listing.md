@@ -71,17 +71,32 @@ First release.
 - **Notes** (paste this):
 
 ```
-MoodLens has no accounts or sign-in; everything works on first launch.
+MoodLens is a mood journal. The user writes a few lines or records a short voice note, and the app shows the emotions it detects, along with a private history and trends over time.
 
-To test:
-1. Type a sentence describing a feeling (e.g. "I finally finished my project and I feel great") and tap Reveal My Mood.
-2. Switch to Voice, allow the microphone, record 2–6 seconds of clear speech, then tap Reveal My Mood.
-3. Tap Readings to see history. "Delete All" there permanently deletes the user's data from the device and our server.
+NO ACCOUNT NEEDED
+There is no sign-up or login, so no demo account is needed. Every feature works on first launch.
 
-Notes:
-- Mood analysis runs on our own server (Google Cloud) using open-source emotion models. If the server has been idle, the first reading can take up to a minute while it wakes; the app shows a message while it waits.
-- MoodLens is a reflection tool, not a medical device. It shows a disclaimer and a link to the 988 Suicide & Crisis Lifeline on the home screen and on any heavy-mood alert.
+HOW TO TEST
+1. Text entry: on the home screen, type a sentence about a feeling, for example "I finally finished my project and I feel great", then tap Reveal My Mood. The result screen shows the strongest emotion and the others under it.
+2. Voice entry: tap Voice, allow microphone access, tap Start Recording, speak clearly for 2 to 6 seconds, tap Stop Recording, then tap Reveal My Mood. Very short or quiet clips return a message asking for a clearer clip. This is expected.
+3. History: tap Readings (top right) to see past entries.
+4. Deleting data: in Readings, tap Delete All and confirm. This permanently deletes the user's entries from the device and from our server, and resets the device's anonymous ID.
+5. Insights: after a few entries, the Daily Reading card on the home screen shows trends. If several entries in a row are negative, it shows a gentle check-in with a link to the 988 Suicide & Crisis Lifeline.
+
+IF THE FIRST READING IS SLOW
+Emotion analysis runs on our own server, which can go idle. If it has been idle, the first reading can take up to a minute while it starts, and the app shows a "waking up" message during the wait. Readings after that take a few seconds.
+
+HEALTH AND SAFETY
+MoodLens is a reflection tool, not a medical device. It does not diagnose, treat, or give medical advice. The home screen has a "Not medical care" notice, and both that notice and any heavy-mood check-in include tap-to-call and tap-to-text links to 988.
+
+DATA AND AI
+- Emotion analysis uses open-source models running on our own server on Google Cloud. No user data is sent to any third-party AI service.
+- Written entries and their results are stored under an anonymous device ID. No name, email, or account is collected. Voice clips are analyzed and then discarded, not stored.
+- There are no ads, no third-party analytics, and no tracking.
 - Privacy policy: https://moodlens-api-536953926843.us-east1.run.app/privacy
+- Support: https://moodlens-api-536953926843.us-east1.run.app/support
+
+Contact: Kirby, kirby@36dunes.com
 ```
 
 ## App Privacy ("nutrition label") answers
